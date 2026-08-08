@@ -2,9 +2,9 @@ name: Sovereign Gate & Control Plane CI
 
 on:
   push:
-    branches: [ main, hermes-agentic-flow ]
+    branches: [ master, main, hermes-agentic-flow, "2-*" ]
   pull_request:
-    branches: [ main, hermes-agentic-flow ]
+    branches: [ master, main, hermes-agentic-flow ]
 
 jobs:
   verify-control-plane:
