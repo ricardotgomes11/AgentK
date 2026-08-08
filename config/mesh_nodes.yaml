@@ -25,3 +25,39 @@ nodes:
     accepts: [web.research, web.extract]
     emits: [web.result]
     write_scope: [workspace/]
+
+  - id: living-system
+    repo: https://github.com/ricardotgomes11/living_system
+    role: adaptive-state
+    trust_tier: core
+    healthcheck: "make health"
+    accepts: [sync.completed, payment.result, web.result]
+    emits: [state.anomaly, state.adapted]
+    write_scope: [runtime/, models/]
+
+  - id: holixtica-ledger
+    repo: https://github.com/ricardotgomes11/holixtica_ledger
+    role: ledger-authority
+    trust_tier: regulated
+    healthcheck: "make health"
+    accepts: [ledger.entry, payment.result, sync.completed]
+    emits: [ledger.committed, ledger.rejected]
+    write_scope: [ledger_state/]
+
+  - id: holixtica-core
+    repo: https://github.com/ricardotgomes11/holixtica-core
+    role: canonical-domain
+    trust_tier: core
+    healthcheck: "make health"
+    accepts: [state.changed, web.result, payment.result]
+    emits: [domain.command, domain.normalized]
+    write_scope: [core_state/]
+
+  - id: widow-ui
+    repo: https://github.com/ricardotgomes11/widow-ui
+    role: operator-interface
+    trust_tier: presentation
+    healthcheck: "npm test"
+    accepts: [state.adapted, ledger.committed, sync.completed]
+    emits: [ui.command, ui.ack]
+    write_scope: [ui_cache/]
