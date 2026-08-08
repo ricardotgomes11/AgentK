@@ -1,9 +1,15 @@
 """
-Verified Paid Outcome Convergence Engine
-========================================
-Proves multi-node convergence across AgentK's 8-node federated mesh:
-Verifies that a specific person received a specific paid outcome,
-and the payment provider confirmed the transfer.
+Verified Paid Outcome Convergence Engine — Financial Finality Layer
+===================================================================
+Distinguishes between mesh orchestration convergence (SIMULATED/PENDING)
+and true economic financial finality (SETTLED + bank_reconciled).
+
+Status Vocabulary:
+  SIMULATED         - Test fixture or locally generated response
+  PENDING           - Payment instruction created
+  PROVIDER_ACCEPTED - Authenticated provider acknowledged payment
+  SETTLED           - Provider and account reconciliation agree
+  RETURNED          - Funds reversed, returned, or failed
 """
 
 import os
@@ -11,14 +17,48 @@ import sys
 import json
 import time
 import hashlib
+from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from mesh_registry import MeshRegistry
 from sovereign_pipeline_executor import SovereignPipelineExecutor
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 CONVERGENCE_LOG = PROJECT_ROOT / "nexus_ledger" / "payout_convergence.log"
+
+
+@dataclass
+class ProviderReceipt:
+    environment: str  # "production" vs "simulated"
+    status: str  # SIMULATED, PENDING, PROVIDER_ACCEPTED, SETTLED, RETURNED
+    provider_transaction_id: str
+    amount_cents: int
+    currency: str = "USD"
+    recipient_account_ref: str = ""
+    signature_verified: bool = False
+    bank_reconciled: bool = False
+
+    @property
+    def provider_confirmed(self) -> bool:
+        return (
+            self.environment == "production"
+            and self.status in {"PROVIDER_ACCEPTED", "SETTLED"}
+            and self.signature_verified
+            and bool(self.provider_transaction_id)
+        )
+
+    @property
+    def bank_settled(self) -> bool:
+        return (
+            self.environment == "production"
+            and self.status == "SETTLED"
+            and self.bank_reconciled
+        )
+
+    @property
+    def financially_final(self) -> bool:
+        return self.provider_confirmed and self.bank_settled
 
 
 class VerifiedPayoutConvergenceEngine:
@@ -29,23 +69,40 @@ class VerifiedPayoutConvergenceEngine:
         self.executor = SovereignPipelineExecutor()
 
     def execute_and_verify_paid_outcome(
-        self, recipient_id: str, recipient_name: str, amount_cents: int, payment_provider: str
+        self,
+        recipient_id: str,
+        recipient_name: str,
+        amount_cents: int,
+        payment_provider: str,
+        provider_receipt: Optional[ProviderReceipt] = None,
     ) -> Dict[str, Any]:
-        """Executes full 6-phase multi-node convergence cycle for a confirmed paid outcome:
-        1. Human Consent & Intent (widow-ui -> holixtica-core)
-        2. Semantic Normalization (holixtica-core -> holixtica-finance)
-        3. Provider Transfer & Confirmation (holixtica-finance -> holixtica-ledger)
-        4. Durable Commitment (holixtica-ledger -> sweepsync & widow-ui)
-        5. Causal Propagation & Replay (sweepsync -> living-system & widow-ui)
-        6. Orchestration Attestation (AgentK chain_head.json)
+        """Executes full 6-phase multi-node convergence cycle and evaluates financial finality:
+        financially_final = provider_confirmed AND bank_settled
         """
         transaction_id = f"tx_{int(time.time())}_{hashlib.sha256(recipient_id.encode()).hexdigest()[:8]}"
+
+        # Default to SIMULATED receipt if no production receipt provided
+        if not provider_receipt:
+            provider_receipt = ProviderReceipt(
+                environment="simulated",
+                status="SIMULATED",
+                provider_transaction_id=f"SIM_REF_{payment_provider.upper()}_{transaction_id}",
+                amount_cents=amount_cents,
+                currency="USD",
+                recipient_account_ref=recipient_id,
+                signature_verified=False,
+                bank_reconciled=False,
+            )
+
         payload = {
             "transaction_id": transaction_id,
             "recipient_id": recipient_id,
             "recipient_name": recipient_name,
             "amount_cents": amount_cents,
             "payment_provider": payment_provider,
+            "status": provider_receipt.status,
+            "environment": provider_receipt.environment,
+            "provider_reference": provider_receipt.provider_transaction_id,
             "timestamp": time.time(),
         }
 
@@ -60,20 +117,15 @@ class VerifiedPayoutConvergenceEngine:
         convergence_trace.append({"phase": "2_semantic_framing", "result": step2})
 
         # Step 3: Financial Execution & Provider Confirmation (holixtica-finance -> holixtica-ledger)
-        provider_confirmation = {
-            **payload,
-            "provider_status": "CONFIRMED",
-            "provider_reference": f"REF_{payment_provider.upper()}_{transaction_id}",
-        }
-        step3 = self.mesh.type_check_and_route("ledger.entry", "holixtica-finance", provider_confirmation)
+        step3 = self.mesh.type_check_and_route("ledger.entry", "holixtica-finance", payload)
         convergence_trace.append({"phase": "3_provider_confirmation", "result": step3})
 
         # Step 4: Durable Ledger Commitment (holixtica-ledger -> sweepsync, widow-ui)
-        step4 = self.mesh.type_check_and_route("ledger.committed", "holixtica-ledger", provider_confirmation)
+        step4 = self.mesh.type_check_and_route("ledger.committed", "holixtica-ledger", payload)
         convergence_trace.append({"phase": "4_durable_commitment", "result": step4})
 
         # Step 5: Causal Propagation & Feedback (sweepsync -> living-system, widow-ui)
-        step5 = self.mesh.type_check_and_route("sync.completed", "sweepsync", provider_confirmation)
+        step5 = self.mesh.type_check_and_route("sync.completed", "sweepsync", payload)
         convergence_trace.append({"phase": "5_causal_propagation", "result": step5})
 
         # Step 6: Sovereign Attestation Anchor
@@ -81,20 +133,28 @@ class VerifiedPayoutConvergenceEngine:
             "transaction_id": transaction_id,
             "recipient_id": recipient_id,
             "amount_cents": amount_cents,
-            "provider_ref": provider_confirmation["provider_reference"],
-            "convergence_trace_len": len(convergence_trace),
+            "status": provider_receipt.status,
+            "environment": provider_receipt.environment,
+            "provider_ref": provider_receipt.provider_transaction_id,
+            "financially_final": provider_receipt.financially_final,
         })
 
-        is_fully_converged = all(s["result"]["status"] == "routed" for s in convergence_trace)
+        is_mesh_converged = all(s["result"]["status"] == "routed" for s in convergence_trace)
 
         final_record = {
             "transaction_id": transaction_id,
-            "is_converged": is_fully_converged,
+            "is_mesh_converged": is_mesh_converged,
+            "financially_final": provider_receipt.financially_final,
+            "provider_confirmed": provider_receipt.provider_confirmed,
+            "bank_settled": provider_receipt.bank_settled,
+            "status": provider_receipt.status,
+            "environment": provider_receipt.environment,
             "recipient_name": recipient_name,
             "paid_amount_usd": amount_cents / 100.0,
             "payment_provider": payment_provider,
-            "provider_reference": provider_confirmation["provider_reference"],
+            "provider_reference": provider_receipt.provider_transaction_id,
             "attestation_hash": attestation_hash,
+            "receipt": asdict(provider_receipt),
             "trace": convergence_trace,
         }
 
@@ -106,6 +166,24 @@ class VerifiedPayoutConvergenceEngine:
 
 if __name__ == "__main__":
     engine = VerifiedPayoutConvergenceEngine()
-    result = engine.execute_and_verify_paid_outcome("user_99", "Ricardo Gomes", 50000, "Mercury_RTP")
-    print(f"[PAID OUTCOME CONVERGENCE] Result (Converged: {result['is_converged']}):")
-    print(json.dumps(result, indent=2))
+    
+    # 1. Simulated Mesh Convergence Execution
+    sim_res = engine.execute_and_verify_paid_outcome("user_99", "Ricardo Gomes", 50000, "Mercury_RTP")
+    print(f"[PAID OUTCOME CONVERGENCE] Simulated Execution (Mesh Converged: {sim_res['is_mesh_converged']}, Financially Final: {sim_res['financially_final']}):")
+    print(json.dumps(sim_res, indent=2))
+
+    # 2. Production Settled Financial Finality Execution
+    prod_receipt = ProviderReceipt(
+        environment="production",
+        status="SETTLED",
+        provider_transaction_id="tx_prod_mercury_9988776655",
+        amount_cents=50000,
+        currency="USD",
+        recipient_account_ref="acc_mercury_gomes",
+        signature_verified=True,
+        bank_reconciled=True,
+    )
+    prod_res = engine.execute_and_verify_paid_outcome("user_99", "Ricardo Gomes", 50000, "Mercury_RTP", provider_receipt=prod_receipt)
+    print(f"[PAID OUTCOME CONVERGENCE] Production Settled Execution (Mesh Converged: {prod_res['is_mesh_converged']}, Financially Final: {prod_res['financially_final']}):")
+    print(json.dumps(prod_res, indent=2))
+
