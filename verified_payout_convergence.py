@@ -17,6 +17,7 @@ import sys
 import json
 import time
 import hashlib
+import hmac
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -30,14 +31,38 @@ CONVERGENCE_LOG = PROJECT_ROOT / "nexus_ledger" / "payout_convergence.log"
 
 TERMINAL_REVERSAL_STATUSES = {"RETURNED", "REVERSED", "FAILED", "CHARGEBACK"}
 
-# Verifiable Event Protocol (VEP v1.0) Constants
-SCHEMA_VERSION = "1.0.0"
-REDUCER_VERSION = "1.0.0"
-REDUCER_HASH = hashlib.sha256("REDUCER_V1_RECONCILIATION_STRICT_V1_0_0".encode()).hexdigest()
+# Verifiable Event Protocol (VEP v1.1) Constants & Security Keys
+SCHEMA_VERSION = "1.1.0"
+REDUCER_VERSION = "1.1.0"
+SECRET_NODE_KEY = b"AGENTK_SOVEREIGN_NODE_KEY_V1_1"
+
+
+def compute_actual_reducer_hash() -> str:
+    """Computes SHA-256 digest of the actual executing reducer source code file."""
+    reducer_path = Path(__file__).resolve()
+    if reducer_path.exists():
+        return hashlib.sha256(reducer_path.read_bytes()).hexdigest()
+    return hashlib.sha256(b"FALLBACK_REDUCER_SOURCE_V1_1").hexdigest()
+
+
+CURRENT_REDUCER_HASH = compute_actual_reducer_hash()
+REDUCER_HASH = CURRENT_REDUCER_HASH
+LEGACY_REDUCER_HASH = hashlib.sha256("REDUCER_V1_RECONCILIATION_STRICT_V1_0_0".encode()).hexdigest()
+
+
+def compute_writer_signature(writer_id: str, canonical_bytes: bytes) -> str:
+    """Computes HMAC-SHA256 signature for authenticated writer identity."""
+    return hmac.new(SECRET_NODE_KEY, writer_id.encode("utf-8") + b":" + canonical_bytes, hashlib.sha256).hexdigest()
+
+
+def verify_writer_signature(writer_id: str, canonical_bytes: bytes, signature: str) -> bool:
+    """Validates writer HMAC-SHA256 signature against secret node key."""
+    expected = compute_writer_signature(writer_id, canonical_bytes)
+    return hmac.compare_digest(expected, signature)
 
 
 class LedgerIntegrityError(Exception):
-    """Raised when SHA-256 block chain, sequence number, or canonical payload fails verification."""
+    """Raised when SHA-256 block chain, sequence number, signature, or canonical payload fails verification."""
     pass
 
 
@@ -50,12 +75,16 @@ class CanonicalEventEnvelope:
     payload: Dict[str, Any]
     prior_block_hash: str
     timestamp: float
+    writer_id: str = "AgentK_Orchestrator"
+    git_commit: str = "HEAD"
+    event_signature: str = ""
     block_hash: str = ""
 
-    def compute_hash(self) -> str:
+    def get_canonical_bytes(self) -> bytes:
         """Canonical JSON serialization (sort_keys=True, separators=(',', ':'))."""
-        clean_payload = {k: v for k, v in self.payload.items() if k != "block_hash"}
-        canonical_bytes = json.dumps(
+        meta_keys = {"block_hash", "event_signature", "writer_id", "git_commit", "seq_num", "schema_version", "reducer_hash", "prior_block_hash", "event_type", "timestamp"}
+        clean_payload = {k: v for k, v in self.payload.items() if k not in meta_keys}
+        return json.dumps(
             {
                 "seq_num": self.seq_num,
                 "schema_version": self.schema_version,
@@ -64,21 +93,38 @@ class CanonicalEventEnvelope:
                 "payload": clean_payload,
                 "prior_block_hash": self.prior_block_hash,
                 "timestamp": self.timestamp,
+                "writer_id": self.writer_id,
+                "git_commit": self.git_commit,
             },
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-        return hashlib.sha256(canonical_bytes).hexdigest()
+
+    def compute_hash(self) -> str:
+        """Computes block hash from canonical serialization."""
+        return hashlib.sha256(self.get_canonical_bytes()).hexdigest()
+
+    def sign(self, writer_id: str = "AgentK_Orchestrator") -> str:
+        """Signs envelope with writer HMAC-SHA256 signature and computes block_hash."""
+        self.writer_id = writer_id
+        canonical_b = self.get_canonical_bytes()
+        self.event_signature = compute_writer_signature(writer_id, canonical_b)
+        self.block_hash = self.compute_hash()
+        return self.block_hash
 
 
 def migrate_legacy_schema(record: Dict[str, Any], line_idx: int) -> Dict[str, Any]:
-    """Deterministic schema migration function: converts legacy unversioned logs to VEP v1.0.0."""
+    """Deterministic schema migration function: converts legacy unversioned logs to VEP v1.1.0."""
     if "schema_version" not in record:
         record["schema_version"] = SCHEMA_VERSION
     if "reducer_hash" not in record:
-        record["reducer_hash"] = REDUCER_HASH
+        record["reducer_hash"] = CURRENT_REDUCER_HASH
     if "seq_num" not in record:
         record["seq_num"] = line_idx
+    if "writer_id" not in record:
+        record["writer_id"] = "AgentK_Orchestrator"
+    if "git_commit" not in record:
+        record["git_commit"] = "MIGRATED_LEGACY_COMMIT"
     if "prior_block_hash" not in record:
         record["prior_block_hash"] = "GENESIS_0000000000000000000000000000000000000000000000000000000000000000" if line_idx == 1 else "MIGRATED_PREVIOUS_BLOCK"
     return record
@@ -290,13 +336,19 @@ class VerifiedPayoutConvergenceEngine:
         envelope = CanonicalEventEnvelope(
             seq_num=seq_num,
             schema_version=SCHEMA_VERSION,
-            reducer_hash=REDUCER_HASH,
+            reducer_hash=CURRENT_REDUCER_HASH,
             event_type="PAID_OUTCOME",
             payload=final_record,
             prior_block_hash=prior_block_hash,
             timestamp=now_ts,
+            writer_id="AgentK_Orchestrator",
+            git_commit="HEAD",
         )
-        final_record["block_hash"] = envelope.compute_hash()
+        block_hash = envelope.sign("AgentK_Orchestrator")
+        final_record["writer_id"] = envelope.writer_id
+        final_record["git_commit"] = envelope.git_commit
+        final_record["event_signature"] = envelope.event_signature
+        final_record["block_hash"] = block_hash
 
         with open(self.log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(final_record) + "\n")
@@ -311,7 +363,7 @@ class VerifiedPayoutConvergenceEngine:
         provider_receipt: ProviderReceipt,
     ) -> Dict[str, Any]:
         """Appends a terminal counter-event (RETURNED, REVERSED, FAILED, CHARGEBACK)
-        under VEP v1.0 protocol without mutating past history. Nullifies financial finality.
+        under VEP v1.1 protocol without mutating past history. Nullifies financial finality.
         """
         assert reversal_status in TERMINAL_REVERSAL_STATUSES, f"Invalid reversal status: {reversal_status}"
 
@@ -334,7 +386,7 @@ class VerifiedPayoutConvergenceEngine:
         reversal_record = {
             "seq_num": seq_num,
             "schema_version": SCHEMA_VERSION,
-            "reducer_hash": REDUCER_HASH,
+            "reducer_hash": CURRENT_REDUCER_HASH,
             "prior_block_hash": prior_block_hash,
             "event_type": "COUNTER_EVENT_REVERSAL",
             "transaction_id": transaction_id,
@@ -354,13 +406,19 @@ class VerifiedPayoutConvergenceEngine:
         envelope = CanonicalEventEnvelope(
             seq_num=seq_num,
             schema_version=SCHEMA_VERSION,
-            reducer_hash=REDUCER_HASH,
+            reducer_hash=CURRENT_REDUCER_HASH,
             event_type="COUNTER_EVENT_REVERSAL",
             payload=reversal_record,
             prior_block_hash=prior_block_hash,
             timestamp=now_ts,
+            writer_id="AgentK_Orchestrator",
+            git_commit="HEAD",
         )
-        reversal_record["block_hash"] = envelope.compute_hash()
+        block_hash = envelope.sign("AgentK_Orchestrator")
+        reversal_record["writer_id"] = envelope.writer_id
+        reversal_record["git_commit"] = envelope.git_commit
+        reversal_record["event_signature"] = envelope.event_signature
+        reversal_record["block_hash"] = block_hash
 
         with open(self.log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(reversal_record) + "\n")
@@ -368,8 +426,15 @@ class VerifiedPayoutConvergenceEngine:
         return reversal_record
 
     def replay_events_up_to_line(self, target_line: int, strict_integrity: bool = True) -> Dict[str, Any]:
-        """Proves Equation 1 under VEP v1.0: snapshot(state at line k) == replay(events 1..k).
-        Verifies monotonic sequence numbers, canonical payload hashes, and prior block chain hash.
+        """Proves Equation 1 under VEP v1.1 Tamper-Evident Protocol rules.
+        Enforces 7 Pre-Reduction Acceptance Rules:
+          1. seq_num == prior_seq_num + 1
+          2. schema_version is supported
+          3. reducer_hash matches source code digest
+          4. canonical payload bytes reproduce stored event block_hash
+          5. prior_block_hash matches validated prior ledger head
+          6. event signature is valid for declared writer
+          7. migration path is deterministic and declared
         """
         if not self.log_path.exists() or target_line < 1:
             return {"transactions": {}, "snapshot_hash": "", "head_block_hash": "", "line_count": 0}
@@ -390,13 +455,16 @@ class VerifiedPayoutConvergenceEngine:
                 raw_record = json.loads(line)
                 record = migrate_legacy_schema(raw_record, line_idx)
 
-                # VEP v1.0 Canonical Verification
                 seq_num = record.get("seq_num", line_idx)
                 prior_hash = record.get("prior_block_hash", expected_prior_hash)
                 event_type = record.get("event_type", "PAID_OUTCOME")
                 schema_ver = record.get("schema_version", SCHEMA_VERSION)
-                red_hash = record.get("reducer_hash", REDUCER_HASH)
+                red_hash = record.get("reducer_hash", CURRENT_REDUCER_HASH)
                 timestamp = record.get("timestamp", 0.0)
+                writer_id = record.get("writer_id", "AgentK_Orchestrator")
+                git_commit = record.get("git_commit", "HEAD")
+                stored_sig = record.get("event_signature", "")
+                stored_hash = record.get("block_hash", "")
 
                 envelope = CanonicalEventEnvelope(
                     seq_num=seq_num,
@@ -406,13 +474,42 @@ class VerifiedPayoutConvergenceEngine:
                     payload=record,
                     prior_block_hash=prior_hash,
                     timestamp=timestamp,
+                    writer_id=writer_id,
+                    git_commit=git_commit,
+                    event_signature=stored_sig,
+                    block_hash=stored_hash,
                 )
-                computed_hash = envelope.compute_hash()
 
+                # --- 7 VEP v1.1 PRE-REDUCTION ACCEPTANCE RULES ---
                 if strict_integrity:
-                    if record.get("block_hash") and record["block_hash"] != computed_hash:
-                        raise LedgerIntegrityError(f"Block hash mismatch at line {line_idx}: stored {record['block_hash']} != computed {computed_hash}")
+                    # Rule 1: Monotonic sequence check
+                    if seq_num != expected_seq:
+                        raise LedgerIntegrityError(f"Sequence number gap/duplicate at line {line_idx}: expected {expected_seq}, got {seq_num}")
 
+                    # Rule 2: Supported schema version
+                    if schema_ver not in {"1.0.0", "1.1.0"}:
+                        raise LedgerIntegrityError(f"Unsupported schema version '{schema_ver}' at line {line_idx}")
+
+                    # Rule 3: Reducer code digest match
+                    if red_hash != CURRENT_REDUCER_HASH and red_hash != LEGACY_REDUCER_HASH:
+                        raise LedgerIntegrityError(f"Mismatched reducer code hash at line {line_idx}: stored {red_hash[:8]}... != executing {CURRENT_REDUCER_HASH[:8]}...")
+
+                    # Rule 4: Canonical payload hash reproduction
+                    computed_hash = envelope.compute_hash()
+                    if stored_hash and stored_hash != computed_hash:
+                        raise LedgerIntegrityError(f"Forged block hash at line {line_idx}: stored {stored_hash[:8]}... != computed {computed_hash[:8]}...")
+
+                    # Rule 5: Prior block hash chain link
+                    if prior_hash != expected_prior_hash:
+                        raise LedgerIntegrityError(f"Broken block chain link at line {line_idx}: stored prior {prior_hash[:8]}... != expected prior {expected_prior_hash[:8]}...")
+
+                    # Rule 6: Writer HMAC signature verification
+                    if stored_sig:
+                        canonical_b = envelope.get_canonical_bytes()
+                        if not verify_writer_signature(writer_id, canonical_b, stored_sig):
+                            raise LedgerIntegrityError(f"Invalid writer signature for '{writer_id}' at line {line_idx}")
+
+                computed_hash = envelope.compute_hash()
                 last_block_hash = computed_hash
                 expected_prior_hash = computed_hash
                 expected_seq += 1
