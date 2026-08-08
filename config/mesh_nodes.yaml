@@ -50,7 +50,7 @@ nodes:
     trust_tier: core
     healthcheck: "make health"
     accepts: [state.changed, web.result, payment.result]
-    emits: [domain.command, domain.normalized]
+    emits: [domain.command, domain.normalized, ledger.entry]
     write_scope: [core_state/]
 
   - id: widow-ui

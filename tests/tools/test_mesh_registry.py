@@ -57,11 +57,39 @@ class TestMeshRegistryGovernance(unittest.TestCase):
 
     def test_e2e_golden_path_pipeline(self):
         registry = MeshRegistry()
-        results = registry.execute_golden_path({"payload": "golden_test"})
-        self.assertEqual(len(results), 5)
+        results = registry.execute_non_monetary_provenance_flow({"payload": "non_monetary_provenance_test"})
+        self.assertEqual(len(results), 6)
         for step in results:
             self.assertEqual(step["status"], "routed")
             self.assertTrue(len(step["recipients"]) > 0)
+
+    def test_six_clause_boolean_conjunction_predicate(self):
+        registry = MeshRegistry()
+        # Valid routing: holixtica-core emitting domain.normalized to holixtica-finance
+        res_valid = registry.is_event_allowed("domain.normalized", "holixtica-core", "holixtica-finance")
+        self.assertTrue(res_valid["allowed"])
+
+        # Clause 1 Failure: Unregistered node
+        res_c1 = registry.is_event_allowed("domain.normalized", "ghost-node", "holixtica-finance")
+        self.assertFalse(res_c1["allowed"])
+        self.assertIn("Clause 1", res_c1["reason"])
+
+        # Clause 2/4 Failure: Unauthorized trust tier emission (widow-ui emitting ledger.entry)
+        res_c2 = registry.is_event_allowed("ledger.entry", "widow-ui", "holixtica-ledger")
+        self.assertFalse(res_c2["allowed"])
+        self.assertIn("Clause 2/4", res_c2["reason"])
+
+        # Clause 3 Failure: Recipient does not accept event
+        res_c3 = registry.is_event_allowed("ui.ack", "widow-ui", "actor-web-automation")
+        self.assertFalse(res_c3["allowed"])
+        self.assertIn("Clause 3/6", res_c3["reason"])
+
+        # Clause 6 Failure: Quarantined node
+        widow = registry.get_node("widow-ui")
+        widow.is_quarantined = True
+        res_c6 = registry.is_event_allowed("state.adapted", "living-system", "widow-ui")
+        self.assertFalse(res_c6["allowed"])
+        self.assertIn("Clause 3/6", res_c6["reason"])
 
 if __name__ == "__main__":
     unittest.main()

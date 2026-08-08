@@ -125,7 +125,38 @@ class MeshRegistry:
         """Returns IDs of nodes authorized to receive event_topic."""
         return [node_id for node_id, node in self.nodes.items() if node.can_accept_event(event_topic)]
 
-    def type_check_and_route(self, event_topic: str, source_node_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def is_event_allowed(self, event_topic: str, source_node_id: str, recipient_node_id: str, effect_path: Optional[str] = None) -> Dict[str, Any]:
+        """Evaluates the 6-clause Boolean conjunction:
+        allowed = source is registered
+              AND source declares event emission
+              AND recipient declares event acceptance
+              AND source trust tier permits this event class
+              AND event effect fits the source write/credential scope
+              AND both nodes are healthy and not quarantined
+        """
+        source = self.get_node(source_node_id)
+        if not source:
+            return {"allowed": False, "reason": "Clause 1 Failed: Source is not registered"}
+
+        recipient = self.get_node(recipient_node_id)
+        if not recipient:
+            return {"allowed": False, "reason": "Clause 1 Failed: Recipient is not registered"}
+
+        if not source.can_emit_event(event_topic):
+            return {"allowed": False, "reason": f"Clause 2/4 Failed: Source {source_node_id} ({source.trust_tier}) unauthorized to emit {event_topic}"}
+
+        if not recipient.can_accept_event(event_topic):
+            return {"allowed": False, "reason": f"Clause 3/6 Failed: Recipient {recipient_node_id} cannot accept {event_topic} (or quarantined)"}
+
+        if effect_path and not source.is_path_in_write_scope(effect_path):
+            return {"allowed": False, "reason": f"Clause 5 Failed: Effect path '{effect_path}' outside write scope"}
+
+        if source.is_quarantined or recipient.is_quarantined:
+            return {"allowed": False, "reason": "Clause 6 Failed: Source or recipient is quarantined"}
+
+        return {"allowed": True, "source": source_node_id, "recipient": recipient_node_id, "event_topic": event_topic}
+
+    def type_check_and_route(self, event_topic: str, source_node_id: str, payload: Dict[str, Any], effect_path: Optional[str] = None) -> Dict[str, Any]:
         """Type-checks emission permissions, requires attestation for regulated nodes, and routes to accepted recipients."""
         source_node = self.get_node(source_node_id)
         if not source_node:
@@ -133,6 +164,9 @@ class MeshRegistry:
 
         if not source_node.can_emit_event(event_topic):
             return {"status": "denied", "reason": f"Node {source_node_id} ({source_node.trust_tier}) unauthorized to emit event {event_topic}"}
+
+        if effect_path and not source_node.is_path_in_write_scope(effect_path):
+            return {"status": "denied", "reason": f"Effect path '{effect_path}' outside write scope for node {source_node_id}"}
 
         # Regulated nodes require attestation
         attestation_hash = None
@@ -152,16 +186,21 @@ class MeshRegistry:
             "attestation_hash": attestation_hash,
         }
 
-    def execute_golden_path(self, initial_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Simulates and verifies the E2E Golden Path pipeline:
-        web.result -> domain.normalized -> ledger.entry -> ledger.committed -> ui.ack
+    def execute_non_monetary_provenance_flow(self, initial_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Executes non-monetary provenance flow:
+        1. actor-web-automation emits web.result
+        2. holixtica-core returns domain.normalized & ledger.entry
+        3. holixtica-ledger commits ledger.committed
+        4. widow-ui renders committed record (ui.ack)
+        5. sweepsync confirms propagation (sync.completed)
         """
         pipeline_steps = [
             ("web.result", "actor-web-automation"),
             ("domain.normalized", "holixtica-core"),
-            ("ledger.entry", "holixtica-finance"),
+            ("ledger.entry", "holixtica-core"),
             ("ledger.committed", "holixtica-ledger"),
             ("ui.ack", "widow-ui"),
+            ("sync.completed", "sweepsync"),
         ]
 
         history = []
