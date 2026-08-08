@@ -4,7 +4,7 @@ nodes:
     role: event-sync
     trust_tier: core
     healthcheck: "make health"
-    accepts: [state.changed, ledger.committed]
+    accepts: [state.changed, ledger.committed, ui.ack]
     emits: [sync.completed, sync.failed]
     write_scope: [runtime/, cache/]
 
@@ -13,7 +13,7 @@ nodes:
     role: financial-adapter
     trust_tier: regulated
     healthcheck: "python -m holixtica_finance.healthcheck"
-    accepts: [payment.authorize, settlement.reconcile]
+    accepts: [payment.authorize, settlement.reconcile, domain.normalized]
     emits: [payment.result, ledger.entry]
     write_scope: [finance_state/]
 
@@ -40,7 +40,7 @@ nodes:
     role: ledger-authority
     trust_tier: regulated
     healthcheck: "make health"
-    accepts: [ledger.entry, payment.result, sync.completed]
+    accepts: [ledger.entry, payment.result, sync.completed, domain.normalized]
     emits: [ledger.committed, ledger.rejected]
     write_scope: [ledger_state/]
 

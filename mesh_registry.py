@@ -1,17 +1,40 @@
 """
-AgentK Federated Mesh Registry
-==============================
-Manages node declarations, trust tiers, event subscriptions, healthchecks,
-and write scope boundary enforcement for AgentK peer nodes.
+AgentK Federated Mesh Registry — Runtime Governance Engine
+=========================================================
+Manages node declarations, trust tiers, active healthcheck quarantining,
+cross-tier event authorization, symlink-proof write scope enforcement,
+and end-to-end golden path execution pipelines for AgentK peer nodes.
 """
 
 import os
 import sys
 import yaml
+import subprocess
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
+from sovereign_pipeline_executor import SovereignPipelineExecutor
+
 CONFIG_PATH = Path(__file__).resolve().parent / "config" / "mesh_nodes.yaml"
+
+# Tier authority levels: presentation (0) < isolated (1) < regulated (2) < core (3)
+TIER_HIERARCHY = {
+    "presentation": 0,
+    "isolated": 1,
+    "regulated": 2,
+    "core": 3,
+}
+
+EVENT_MIN_TIER = {
+    "payment.authorize": "regulated",
+    "settlement.reconcile": "regulated",
+    "ledger.entry": "regulated",
+    "ledger.committed": "regulated",
+    "domain.command": "core",
+    "domain.normalized": "core",
+    "ui.command": "presentation",
+    "ui.ack": "presentation",
+}
 
 
 class MeshNode:
@@ -24,19 +47,48 @@ class MeshNode:
         self.accepts: List[str] = node_data.get("accepts", [])
         self.emits: List[str] = node_data.get("emits", [])
         self.write_scope: List[str] = node_data.get("write_scope", [])
+        self.is_quarantined: bool = False
 
     def can_accept_event(self, event_topic: str) -> bool:
+        if self.is_quarantined:
+            return False
         return event_topic in self.accepts
 
-    def is_path_in_write_scope(self, target_path: str) -> bool:
-        norm_path = target_path.lstrip("/")
-        return any(norm_path.startswith(ws.lstrip("/")) for ws in self.write_scope)
+    def can_emit_event(self, event_topic: str) -> bool:
+        if self.is_quarantined:
+            return False
+        if event_topic not in self.emits:
+            return False
+        # Cross-tier enforcement: check required tier vs node tier
+        min_tier = EVENT_MIN_TIER.get(event_topic, "isolated")
+        if TIER_HIERARCHY.get(self.trust_tier, 0) < TIER_HIERARCHY.get(min_tier, 0):
+            return False
+        return True
+
+    def is_path_in_write_scope(self, target_path: str, base_dir: Optional[Path] = None) -> bool:
+        """Verifies target path falls strictly within declared write_scope, resolving symlinks & relative traversals."""
+        base_dir = base_dir or Path.cwd()
+        try:
+            resolved_target = (base_dir / target_path).resolve()
+        except Exception:
+            return False
+
+        for scope in self.write_scope:
+            resolved_scope = (base_dir / scope).resolve()
+            try:
+                # Check if target is inside or equal to scope directory
+                resolved_target.relative_to(resolved_scope)
+                return True
+            except ValueError:
+                continue
+        return False
 
 
 class MeshRegistry:
     def __init__(self, config_path: Path = CONFIG_PATH):
         self.config_path = config_path
         self.nodes: Dict[str, MeshNode] = {}
+        self.executor = SovereignPipelineExecutor()
         self.load_nodes()
 
     def load_nodes(self):
@@ -51,13 +103,82 @@ class MeshRegistry:
     def get_node(self, node_id: str) -> Optional[MeshNode]:
         return self.nodes.get(node_id)
 
+    def run_healthcheck(self, node_id: str) -> bool:
+        """Executes the healthcheck command for a node. Quarantines node if healthcheck fails."""
+        node = self.get_node(node_id)
+        if not node:
+            return False
+        try:
+            # Simulate or execute healthcheck in sandbox
+            res = subprocess.run(node.healthcheck, shell=True, capture_output=True, text=True, timeout=10.0)
+            if res.returncode == 0:
+                node.is_quarantined = False
+                return True
+            else:
+                node.is_quarantined = True
+                return False
+        except Exception:
+            node.is_quarantined = True
+            return False
+
     def route_event(self, event_topic: str) -> List[str]:
         """Returns IDs of nodes authorized to receive event_topic."""
         return [node_id for node_id, node in self.nodes.items() if node.can_accept_event(event_topic)]
+
+    def type_check_and_route(self, event_topic: str, source_node_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Type-checks emission permissions, requires attestation for regulated nodes, and routes to accepted recipients."""
+        source_node = self.get_node(source_node_id)
+        if not source_node:
+            return {"status": "denied", "reason": f"Unknown source node: {source_node_id}"}
+
+        if not source_node.can_emit_event(event_topic):
+            return {"status": "denied", "reason": f"Node {source_node_id} ({source_node.trust_tier}) unauthorized to emit event {event_topic}"}
+
+        # Regulated nodes require attestation
+        attestation_hash = None
+        if source_node.trust_tier in ["regulated", "core"]:
+            attestation_hash = self.executor._attest_event("MESH_EVENT_EMITTED", {
+                "source_node": source_node_id,
+                "event_topic": event_topic,
+                "payload_digest": payload,
+            })
+
+        recipients = [nid for nid, node in self.nodes.items() if node.can_accept_event(event_topic)]
+        return {
+            "status": "routed",
+            "source_node": source_node_id,
+            "event_topic": event_topic,
+            "recipients": recipients,
+            "attestation_hash": attestation_hash,
+        }
+
+    def execute_golden_path(self, initial_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Simulates and verifies the E2E Golden Path pipeline:
+        web.result -> domain.normalized -> ledger.entry -> ledger.committed -> ui.ack
+        """
+        pipeline_steps = [
+            ("web.result", "actor-web-automation"),
+            ("domain.normalized", "holixtica-core"),
+            ("ledger.entry", "holixtica-finance"),
+            ("ledger.committed", "holixtica-ledger"),
+            ("ui.ack", "widow-ui"),
+        ]
+
+        history = []
+        current_payload = initial_payload
+        for event_topic, source_node in pipeline_steps:
+            res = self.type_check_and_route(event_topic, source_node, current_payload)
+            history.append(res)
+            if res["status"] != "routed":
+                break
+        return history
 
 
 if __name__ == "__main__":
     registry = MeshRegistry()
     print(f"[MESH REGISTRY] Loaded {len(registry.nodes)} nodes: {list(registry.nodes.keys())}")
-    for nid, n in registry.nodes.items():
-        print(f" - Node {nid} ({n.trust_tier}): accepts {n.accepts}, emits {n.emits}")
+    golden_results = registry.execute_golden_path({"query": "sovereign_test"})
+    print(f"[MESH REGISTRY] Golden Path Execution ({len(golden_results)} steps):")
+    for step in golden_results:
+        print(f" - {step['event_topic']} from {step['source_node']} -> {step['recipients']} (Status: {step['status']})")
+
