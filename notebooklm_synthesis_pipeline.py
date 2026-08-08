@@ -115,11 +115,22 @@ Latest Ledger Attestation:
 
         prov_hash = self.store_provenance(draft, change)
 
-        # Stage 7: Publish or Queue
+        # Stage 7: Publish or Queue & Route to Peer Mesh Nodes
         if publish:
             doc_file = self.knowledge_dir / f"synthesis_{int(time.time())}.md"
             doc_file.write_text(draft)
-            return {"status": "published", "file": str(doc_file), "provenance_hash": prov_hash}
+            
+            # Peer Mesh Event Dispatch
+            from mesh_registry import MeshRegistry
+            mesh = MeshRegistry()
+            target_nodes = mesh.route_event("content.published")
+            
+            return {
+                "status": "published",
+                "file": str(doc_file),
+                "provenance_hash": prov_hash,
+                "dispatched_to_nodes": target_nodes,
+            }
         else:
             return {"status": "queued", "draft": draft, "provenance_hash": prov_hash}
 

@@ -58,6 +58,15 @@ nodes:
     role: operator-interface
     trust_tier: presentation
     healthcheck: "npm test"
-    accepts: [state.adapted, ledger.committed, sync.completed]
+    accepts: [state.adapted, ledger.committed, sync.completed, content.published]
     emits: [ui.command, ui.ack]
     write_scope: [ui_cache/]
+
+  - id: notebooklm-synthesizer
+    repo: https://github.com/ricardotgomes11/AgentK
+    role: grounded-synthesis
+    trust_tier: core
+    healthcheck: "python -m pytest tests/tools/test_notebooklm_synthesis_pipeline.py"
+    accepts: [repo.changed, synthesis.requested]
+    emits: [evidence.compiled, draft.generated, draft.validated, provenance.logged, content.published]
+    write_scope: [knowledge/, nexus_ledger/]
