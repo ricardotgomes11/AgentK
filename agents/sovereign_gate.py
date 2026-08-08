@@ -16,6 +16,7 @@ try:
     from google.antigravity import types
 except ImportError:
     class _PolicyStub:
+        Policy = object
         @staticmethod
         def deny(tool, when=None, name=None):
             return SimpleNamespace(name=name, tool=tool, when=when, action="deny")
@@ -215,7 +216,7 @@ def console_approval_handler(tc: types.ToolCall) -> bool:
         return False
 
 
-def get_sovereign_policies() -> list[policy.Policy]:
+def get_sovereign_policies() -> list:
     """Returns the list of sealed policy constraints."""
     file_write_tools = [
         "write_to_file",
