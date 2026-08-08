@@ -67,9 +67,13 @@ print()
 # -------------------------------------------------------------------
 # ATTACK SURFACE 1: Direct file overwrite of control plane
 # -------------------------------------------------------------------
-print("▸ ATTACK SURFACE 1: Direct file overwrite")
-print("  Simulates: agent writes raw Python to overwrite agent_kernel.py")
-print()
+# Ensure OS-level read-only permissions on protected control-plane files
+for protected in PROTECTED_FILES:
+    if protected.exists():
+        try:
+            os.chmod(protected, 0o444)
+        except Exception:
+            pass
 
 for protected in PROTECTED_FILES:
     original_hash = hashlib.sha256(protected.read_bytes()).hexdigest()

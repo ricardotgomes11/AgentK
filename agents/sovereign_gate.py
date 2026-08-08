@@ -11,8 +11,30 @@ import re
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from google.antigravity.hooks import policy
-from google.antigravity import types
+try:
+    from google.antigravity.hooks import policy
+    from google.antigravity import types
+except ImportError:
+    class _PolicyStub:
+        @staticmethod
+        def deny(tool, when=None, name=None):
+            return SimpleNamespace(name=name, tool=tool, when=when, action="deny")
+        @staticmethod
+        def ask_user(tool, handler=None, when=None, name=None):
+            return SimpleNamespace(name=name, tool=tool, when=when, handler=handler, action="ask_user")
+        @staticmethod
+        def allow(tool, name=None):
+            return SimpleNamespace(name=name, tool=tool, action="allow")
+
+    class _TypesStub:
+        class ToolCall:
+            def __init__(self, name="", args=None, canonical_path=None):
+                self.name = name
+                self.args = args or {}
+                self.canonical_path = canonical_path
+
+    policy = _PolicyStub()
+    types = _TypesStub()
 
 # ---------------------------------------------------------------------------
 # Dynamic Project Root Resolution
