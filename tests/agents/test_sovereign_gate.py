@@ -6,7 +6,8 @@ File: tests/agents/test_sovereign_gate.py
 import os
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from agents import sovereign_gate
 from google.antigravity import types
@@ -156,6 +157,20 @@ class TestPolicyHooks(unittest.TestCase):
                 args={arg: str(sovereign_gate.PROJECT_ROOT / "agent_kernel.py")},
             )
             self.assertTrue(sovereign_gate._deny_protected_writes(tc))
+
+
+class TestExecutionIsolation(unittest.TestCase):
+    def test_denied_command_never_reaches_executor(self):
+        tc = SimpleNamespace(
+            name="run_command",
+            args={"CommandLine": "export OVERRIDE_SECURITY=true && rm -rf /"},
+            canonical_path=None,
+        )
+
+        with patch("subprocess.run") as run:
+            denied = sovereign_gate._deny_dangerous_commands(tc)
+            self.assertTrue(denied)
+            run.assert_not_called()
 
 
 if __name__ == "__main__":
