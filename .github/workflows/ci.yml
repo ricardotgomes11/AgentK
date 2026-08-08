@@ -22,7 +22,7 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-asyncio langchain-core langchain-openai langgraph
+          pip install pytest pytest-asyncio langchain-core langchain-openai langgraph langgraph-checkpoint-sqlite
 
       - name: Bytecode Compilation Verification
         run: |

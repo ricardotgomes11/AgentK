@@ -9,12 +9,20 @@ import platform
 import shutil
 from pathlib import Path
 
-from langgraph.checkpoint.sqlite import SqliteSaver
-
 PROJECT_ROOT = Path(__file__).resolve().parent
 
-conn = sqlite3.connect(str(PROJECT_ROOT / "checkpoints.sqlite"), check_same_thread=False)
-checkpointer = SqliteSaver(conn)
+try:
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    conn = sqlite3.connect(str(PROJECT_ROOT / "checkpoints.sqlite"), check_same_thread=False)
+    checkpointer = SqliteSaver(conn)
+except Exception:
+    try:
+        from langgraph_checkpoint_sqlite import SqliteSaver
+        conn = sqlite3.connect(str(PROJECT_ROOT / "checkpoints.sqlite"), check_same_thread=False)
+        checkpointer = SqliteSaver(conn)
+    except Exception:
+        from langgraph.checkpoint.memory import MemorySaver
+        checkpointer = MemorySaver()
 
 
 def get_platform_info() -> dict:
