@@ -1,0 +1,27 @@
+nodes:
+  - id: sweepsync
+    repo: https://github.com/ricardotgomes11/SweepSync
+    role: event-sync
+    trust_tier: core
+    healthcheck: "make health"
+    accepts: [state.changed, ledger.committed]
+    emits: [sync.completed, sync.failed]
+    write_scope: [runtime/, cache/]
+
+  - id: holixtica-finance
+    repo: https://github.com/ricardotgomes11/holixtica-finance
+    role: financial-adapter
+    trust_tier: regulated
+    healthcheck: "python -m holixtica_finance.healthcheck"
+    accepts: [payment.authorize, settlement.reconcile]
+    emits: [payment.result, ledger.entry]
+    write_scope: [finance_state/]
+
+  - id: actor-web-automation
+    repo: https://github.com/ricardotgomes11/actor-web-automation-agent
+    role: browser-automation
+    trust_tier: isolated
+    healthcheck: "npm test"
+    accepts: [web.research, web.extract]
+    emits: [web.result]
+    write_scope: [workspace/]
