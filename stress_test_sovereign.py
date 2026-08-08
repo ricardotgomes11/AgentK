@@ -29,6 +29,7 @@ PROTECTED_FILES = [
     AGENTK_ROOT / "agent_kernel.py",
     AGENTK_ROOT / "agents" / "sdk_bridge.py",
     AGENTK_ROOT / "self_heal.sh",
+    AGENTK_ROOT / "requirements.txt",
 ]
 AGENTS_DIR = AGENTK_ROOT / "agents"
 TOOLS_DIR = AGENTK_ROOT / "tools"
