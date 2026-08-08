@@ -11,14 +11,26 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
+def get_sqlite_connection(db_path: Path = None) -> sqlite3.Connection:
+    """Creates a thread-safe SQLite connection configured with WAL mode and busy timeout."""
+    target_db = db_path or (PROJECT_ROOT / "checkpoints.sqlite")
+    c = sqlite3.connect(str(target_db), check_same_thread=False, timeout=10.0)
+    try:
+        c.execute("PRAGMA journal_mode=WAL;")
+        c.execute("PRAGMA synchronous=NORMAL;")
+        c.execute("PRAGMA busy_timeout=5000;")
+    except Exception:
+        pass
+    return c
+
 try:
     from langgraph.checkpoint.sqlite import SqliteSaver
-    conn = sqlite3.connect(str(PROJECT_ROOT / "checkpoints.sqlite"), check_same_thread=False)
+    conn = get_sqlite_connection()
     checkpointer = SqliteSaver(conn)
 except Exception:
     try:
         from langgraph_checkpoint_sqlite import SqliteSaver
-        conn = sqlite3.connect(str(PROJECT_ROOT / "checkpoints.sqlite"), check_same_thread=False)
+        conn = get_sqlite_connection()
         checkpointer = SqliteSaver(conn)
     except Exception:
         from langgraph.checkpoint.memory import MemorySaver
