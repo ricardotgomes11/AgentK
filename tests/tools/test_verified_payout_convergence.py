@@ -93,5 +93,15 @@ class TestVerifiedPayoutConvergence(unittest.TestCase):
             self.assertTrue(prod_receipt.is_reversed)
             self.assertEqual(prod_receipt.status, "RETURNED")
 
+            # Test Replay Log from Origin to Present
+            replayed_state = engine.replay_ledger_state()
+            self.assertIn(res["transaction_id"], replayed_state)
+            replayed_tx = replayed_state[res["transaction_id"]]
+            self.assertFalse(replayed_tx["financially_final"])
+            self.assertTrue(replayed_tx["is_reversed"])
+            self.assertEqual(replayed_tx["status"], "RETURNED")
+            self.assertEqual(replayed_tx["origin_line"], 1)
+            self.assertEqual(replayed_tx["last_replayed_line"], 2)
+
 if __name__ == "__main__":
     unittest.main()
