@@ -16,22 +16,20 @@ Distinguishes between **mesh convergence** (`is_mesh_converged` = node agreement
 
 A transaction is marked `financially_final = True` if and only if:
 
-$$\text{financially\_final} = \text{provider\_confirmed} \land \text{bank\_settled}$$
+$$\text{financially\_final} = \text{production} \land \text{signature\_verified} \land \text{provider\_settled} \land \text{seven\_field\_match} \land \text{within\_settlement\_window} \land \neg\text{reversed}$$
 
 Where:
 ```python
-bank_settled = (
-    receipt.environment == "production"
-    and receipt.status == "SETTLED"
-    and receipt.signature_verified
-    and reconciliation.matches(
-        provider_transaction_id=receipt.provider_transaction_id,
-        amount_cents=receipt.amount_cents,
-        currency=receipt.currency,
-        recipient_account_ref=receipt.recipient_account_ref,
-        direction="OUTBOUND",
-    )
+seven_field_match = (
+    rec.provider_transaction_id == receipt.provider_transaction_id
+    and rec.amount_cents == receipt.amount_cents
+    and rec.currency == receipt.currency
+    and rec.recipient_account_ref == receipt.recipient_account_ref
+    and rec.direction == "OUTBOUND"
+    and rec.provider_account_id == receipt.provider_account_id
 )
+within_settlement_window = abs(rec.settled_timestamp - receipt.event_timestamp) <= max_window_seconds
+not_reversed = not receipt.is_reversed and receipt.status not in {"RETURNED", "REVERSED", "FAILED", "CHARGEBACK"}
 ```
 
 ## Quick Start

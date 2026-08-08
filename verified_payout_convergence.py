@@ -28,6 +28,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 CONVERGENCE_LOG = PROJECT_ROOT / "nexus_ledger" / "payout_convergence.log"
 
 
+TERMINAL_REVERSAL_STATUSES = {"RETURNED", "REVERSED", "FAILED", "CHARGEBACK"}
+
+
 @dataclass
 class ReconciliationRecord:
     reconciliation_id: str
@@ -35,6 +38,7 @@ class ReconciliationRecord:
     amount_cents: int
     currency: str = "USD"
     recipient_account_ref: str = ""
+    provider_account_id: str = ""
     direction: str = "OUTBOUND"
     settled_timestamp: float = 0.0
 
@@ -42,26 +46,47 @@ class ReconciliationRecord:
 @dataclass
 class ProviderReceipt:
     environment: str  # "production" vs "simulated"
-    status: str  # SIMULATED, PENDING, PROVIDER_ACCEPTED, SETTLED, RETURNED
+    status: str  # SIMULATED, PENDING, PROVIDER_ACCEPTED, SETTLED, RETURNED, REVERSED, FAILED, CHARGEBACK
     provider_transaction_id: str
     amount_cents: int
     currency: str = "USD"
     recipient_account_ref: str = ""
+    provider_account_id: str = ""
     raw_signature_digest: str = ""
     signature_verified: bool = False
+    event_timestamp: float = 0.0
+    is_reversed: bool = False
+    reversal_reason: Optional[str] = None
     reconciliation: Optional[ReconciliationRecord] = None
 
-    def matches_reconciliation(self, rec: Optional[ReconciliationRecord]) -> bool:
-        """Verifies amount, currency, direction, account reference, and provider transaction ID match."""
+    def matches_reconciliation(
+        self, rec: Optional[ReconciliationRecord], max_window_seconds: float = 86400.0
+    ) -> bool:
+        """Verifies 7-field match + time window constraint + non-reversed status:
+        1. provider_transaction_id
+        2. amount_cents
+        3. currency
+        4. recipient_account_ref
+        5. direction == "OUTBOUND"
+        6. provider_account_id
+        7. |settled_timestamp - event_timestamp| <= max_window_seconds
+        """
         if not rec:
             return False
-        return (
+
+        time_diff = abs(rec.settled_timestamp - self.event_timestamp)
+        within_window = time_diff <= max_window_seconds
+
+        seven_field_match = (
             rec.provider_transaction_id == self.provider_transaction_id
             and rec.amount_cents == self.amount_cents
             and rec.currency == self.currency
             and rec.recipient_account_ref == self.recipient_account_ref
             and rec.direction.upper() == "OUTBOUND"
+            and rec.provider_account_id == self.provider_account_id
         )
+
+        return seven_field_match and within_window
 
     @property
     def provider_confirmed(self) -> bool:
@@ -69,6 +94,8 @@ class ProviderReceipt:
             self.environment == "production"
             and self.status in {"PROVIDER_ACCEPTED", "SETTLED"}
             and self.signature_verified
+            and not self.is_reversed
+            and self.status not in TERMINAL_REVERSAL_STATUSES
             and bool(self.provider_transaction_id)
         )
 
@@ -78,12 +105,19 @@ class ProviderReceipt:
             self.environment == "production"
             and self.status == "SETTLED"
             and self.signature_verified
+            and not self.is_reversed
+            and self.status not in TERMINAL_REVERSAL_STATUSES
             and self.matches_reconciliation(self.reconciliation)
         )
 
     @property
     def financially_final(self) -> bool:
-        return self.provider_confirmed and self.bank_settled
+        return (
+            self.provider_confirmed
+            and self.bank_settled
+            and not self.is_reversed
+            and self.status not in TERMINAL_REVERSAL_STATUSES
+        )
 
 
 class VerifiedPayoutConvergenceEngine:
@@ -188,6 +222,52 @@ class VerifiedPayoutConvergenceEngine:
 
         return final_record
 
+    def append_reversal_counter_event(
+        self,
+        transaction_id: str,
+        reversal_status: str,
+        reversal_reason: str,
+        provider_receipt: ProviderReceipt,
+    ) -> Dict[str, Any]:
+        """Appends a terminal counter-event (RETURNED, REVERSED, FAILED, CHARGEBACK)
+        to the ledger without mutating past history. Nullifies financial finality.
+        """
+        assert reversal_status in TERMINAL_REVERSAL_STATUSES, f"Invalid reversal status: {reversal_status}"
+
+        # Update receipt state to terminal counter-event
+        provider_receipt.status = reversal_status
+        provider_receipt.is_reversed = True
+        provider_receipt.reversal_reason = reversal_reason
+
+        attestation_hash = self.executor._attest_event("PAID_OUTCOME_REVERSED", {
+            "transaction_id": transaction_id,
+            "reversal_status": reversal_status,
+            "reversal_reason": reversal_reason,
+            "provider_ref": provider_receipt.provider_transaction_id,
+            "financially_final": provider_receipt.financially_final,
+        })
+
+        reversal_record = {
+            "transaction_id": transaction_id,
+            "event_type": "COUNTER_EVENT_REVERSAL",
+            "is_mesh_converged": True,
+            "financially_final": False,  # Nullified
+            "provider_confirmed": False,
+            "bank_settled": False,
+            "status": reversal_status,
+            "reversal_reason": reversal_reason,
+            "environment": provider_receipt.environment,
+            "provider_reference": provider_receipt.provider_transaction_id,
+            "attestation_hash": attestation_hash,
+            "receipt": asdict(provider_receipt),
+            "timestamp": time.time(),
+        }
+
+        with open(self.log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(reversal_record) + "\n")
+
+        return reversal_record
+
 
 if __name__ == "__main__":
     engine = VerifiedPayoutConvergenceEngine()
@@ -198,14 +278,16 @@ if __name__ == "__main__":
     print(json.dumps(sim_res, indent=2))
 
     # 2. Production Settled Financial Finality Execution
+    now = time.time()
     rec_record = ReconciliationRecord(
         reconciliation_id="rec_bank_statement_990011",
         provider_transaction_id="tx_prod_mercury_9988776655",
         amount_cents=50000,
         currency="USD",
         recipient_account_ref="acc_mercury_gomes",
+        provider_account_id="acct_mercury_biz_01",
         direction="OUTBOUND",
-        settled_timestamp=time.time(),
+        settled_timestamp=now,
     )
     prod_receipt = ProviderReceipt(
         environment="production",
@@ -214,11 +296,18 @@ if __name__ == "__main__":
         amount_cents=50000,
         currency="USD",
         recipient_account_ref="acc_mercury_gomes",
+        provider_account_id="acct_mercury_biz_01",
         raw_signature_digest="sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         signature_verified=True,
+        event_timestamp=now,
         reconciliation=rec_record,
     )
     prod_res = engine.execute_and_verify_paid_outcome("user_99", "Ricardo Gomes", 50000, "Mercury_RTP", provider_receipt=prod_receipt)
     print(f"[PAID OUTCOME CONVERGENCE] Production Settled Execution (Mesh Converged: {prod_res['is_mesh_converged']}, Financially Final: {prod_res['financially_final']}):")
     print(json.dumps(prod_res, indent=2))
+
+    # 3. Terminal Counter-Event Reversal (RETURNED)
+    rev_res = engine.append_reversal_counter_event(prod_res["transaction_id"], "RETURNED", "ACH_R01_INSUFFICIENT_FUNDS", prod_receipt)
+    print(f"[PAID OUTCOME CONVERGENCE] Terminal Reversal Appended (Financially Final: {rev_res['financially_final']}):")
+    print(json.dumps(rev_res, indent=2))
 

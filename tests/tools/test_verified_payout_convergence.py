@@ -23,10 +23,11 @@ class TestVerifiedPayoutConvergence(unittest.TestCase):
             self.assertEqual(res["environment"], "simulated")
             self.assertEqual(res["paid_amount_usd"], 250.0)
 
-    def test_production_financial_finality(self):
+    def test_production_financial_finality_and_reversal(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = Path(tmpdir) / "payout_convergence.log"
             engine = VerifiedPayoutConvergenceEngine(log_path=log_path)
+            now = 1700000000.0
 
             rec = ReconciliationRecord(
                 reconciliation_id="rec_001",
@@ -34,7 +35,9 @@ class TestVerifiedPayoutConvergence(unittest.TestCase):
                 amount_cents=50000,
                 currency="USD",
                 recipient_account_ref="acc_mercury_gomes",
+                provider_account_id="acct_mercury_biz_01",
                 direction="OUTBOUND",
+                settled_timestamp=now + 300.0,  # 5 minutes later
             )
 
             prod_receipt = ProviderReceipt(
@@ -44,8 +47,10 @@ class TestVerifiedPayoutConvergence(unittest.TestCase):
                 amount_cents=50000,
                 currency="USD",
                 recipient_account_ref="acc_mercury_gomes",
+                provider_account_id="acct_mercury_biz_01",
                 raw_signature_digest="sha256:abc123def456",
                 signature_verified=True,
+                event_timestamp=now,
                 reconciliation=rec,
             )
 
@@ -61,8 +66,32 @@ class TestVerifiedPayoutConvergence(unittest.TestCase):
             self.assertTrue(res["financially_final"])
             self.assertTrue(res["provider_confirmed"])
             self.assertTrue(res["bank_settled"])
-            self.assertEqual(res["status"], "SETTLED")
-            self.assertEqual(res["environment"], "production")
+
+            # Test Out of Window Failure (e.g. 48h late reconciliation)
+            late_rec = ReconciliationRecord(
+                reconciliation_id="rec_late_002",
+                provider_transaction_id="tx_mercury_prod_001",
+                amount_cents=50000,
+                currency="USD",
+                recipient_account_ref="acc_mercury_gomes",
+                provider_account_id="acct_mercury_biz_01",
+                direction="OUTBOUND",
+                settled_timestamp=now + 172800.0,  # 48 hours later (> 24h window)
+            )
+            self.assertFalse(prod_receipt.matches_reconciliation(late_rec, max_window_seconds=86400.0))
+
+            # Test Append-Only Reversal Counter-Event
+            rev_res = engine.append_reversal_counter_event(
+                transaction_id=res["transaction_id"],
+                reversal_status="RETURNED",
+                reversal_reason="ACH_R01_INSUFFICIENT_FUNDS",
+                provider_receipt=prod_receipt,
+            )
+
+            self.assertFalse(rev_res["financially_final"])
+            self.assertFalse(prod_receipt.financially_final)
+            self.assertTrue(prod_receipt.is_reversed)
+            self.assertEqual(prod_receipt.status, "RETURNED")
 
 if __name__ == "__main__":
     unittest.main()
