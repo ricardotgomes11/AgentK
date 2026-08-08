@@ -154,8 +154,7 @@ for protected in PROTECTED_FILES:
 print()
 
 
-from agents.sovereign_gate import _is_agent_or_tool_write, is_protected_path, _deny_dangerous_commands
-from google.antigravity import types
+from agents.sovereign_gate import _is_agent_or_tool_write, is_protected_path, _deny_dangerous_commands, types
 
 # -------------------------------------------------------------------
 # ATTACK SURFACE 3: Agent self-replication without approval
