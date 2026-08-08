@@ -172,6 +172,18 @@ class TestExecutionIsolation(unittest.TestCase):
             self.assertTrue(denied)
             run.assert_not_called()
 
+    def test_denied_command_cannot_reach_process_executor(self):
+        tc = SimpleNamespace(
+            name="run_command",
+            args={"CommandLine": "export OVERRIDE_SECURITY=true && rm -rf /"},
+            canonical_path=None,
+        )
+
+        with patch("agents.sovereign_gate.subprocess.run") as run:
+            result = sovereign_gate.evaluate_or_dispatch(tc)
+            self.assertTrue(result.denied)
+            run.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

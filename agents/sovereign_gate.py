@@ -8,7 +8,9 @@ Seals the 13 breaches identified in the stress test.
 
 import os
 import re
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from google.antigravity.hooks import policy
 from google.antigravity import types
 
@@ -271,3 +273,11 @@ def get_sovereign_policies() -> list[policy.Policy]:
     policies.append(policy.allow("*", name="sovereign_fallback_allow"))
 
     return policies
+
+
+def evaluate_or_dispatch(tc: types.ToolCall) -> SimpleNamespace:
+    """Public policy evaluation and dispatch path for sovereign gate."""
+    if _deny_protected_writes(tc) or _deny_dangerous_commands(tc):
+        return SimpleNamespace(denied=True, allowed=False, action="denied")
+
+    return SimpleNamespace(denied=False, allowed=True, action="allowed")
