@@ -95,8 +95,10 @@ class TestVerifiedPayoutConvergence(unittest.TestCase):
 
             # Test Replay Log from Origin to Present
             replayed_state = engine.replay_ledger_state()
-            self.assertIn(res["transaction_id"], replayed_state)
-            replayed_tx = replayed_state[res["transaction_id"]]
+            self.assertIn("transactions", replayed_state)
+            txs = replayed_state["transactions"]
+            self.assertIn(res["transaction_id"], txs)
+            replayed_tx = txs[res["transaction_id"]]
             self.assertFalse(replayed_tx["financially_final"])
             self.assertTrue(replayed_tx["is_reversed"])
             self.assertEqual(replayed_tx["status"], "RETURNED")
@@ -151,7 +153,7 @@ class TestVerifiedPayoutConvergence(unittest.TestCase):
             snapshot_k1 = engine.replay_events_up_to_line(1)
             replay_1 = engine.replay_ledger_state()
             self.assertEqual(snapshot_k1, replay_1)
-            self.assertTrue(snapshot_k1[res1["transaction_id"]]["financially_final"])
+            self.assertTrue(snapshot_k1["transactions"][res1["transaction_id"]]["financially_final"])
 
             # Event 2: Append Counter-Event Reversal
             engine.append_reversal_counter_event(
@@ -163,13 +165,13 @@ class TestVerifiedPayoutConvergence(unittest.TestCase):
 
             # Equation 1 Check at Line 1 (Past snapshot preserved)
             snapshot_k1_after = engine.replay_events_up_to_line(1)
-            self.assertTrue(snapshot_k1_after[res1["transaction_id"]]["financially_final"])
+            self.assertTrue(snapshot_k1_after["transactions"][res1["transaction_id"]]["financially_final"])
 
             # Equation 2 Check at Line 2 (Materialized View == Full Replay 1..N)
             replay_1_to_N = engine.replay_ledger_state()
             materialized_view = engine.get_materialized_view()
             self.assertEqual(replay_1_to_N, materialized_view)
-            self.assertFalse(materialized_view[res1["transaction_id"]]["financially_final"])
+            self.assertFalse(materialized_view["transactions"][res1["transaction_id"]]["financially_final"])
 
 if __name__ == "__main__":
     unittest.main()

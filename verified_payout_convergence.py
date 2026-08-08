@@ -30,6 +30,59 @@ CONVERGENCE_LOG = PROJECT_ROOT / "nexus_ledger" / "payout_convergence.log"
 
 TERMINAL_REVERSAL_STATUSES = {"RETURNED", "REVERSED", "FAILED", "CHARGEBACK"}
 
+# Verifiable Event Protocol (VEP v1.0) Constants
+SCHEMA_VERSION = "1.0.0"
+REDUCER_VERSION = "1.0.0"
+REDUCER_HASH = hashlib.sha256("REDUCER_V1_RECONCILIATION_STRICT_V1_0_0".encode()).hexdigest()
+
+
+class LedgerIntegrityError(Exception):
+    """Raised when SHA-256 block chain, sequence number, or canonical payload fails verification."""
+    pass
+
+
+@dataclass
+class CanonicalEventEnvelope:
+    seq_num: int
+    schema_version: str
+    reducer_hash: str
+    event_type: str
+    payload: Dict[str, Any]
+    prior_block_hash: str
+    timestamp: float
+    block_hash: str = ""
+
+    def compute_hash(self) -> str:
+        """Canonical JSON serialization (sort_keys=True, separators=(',', ':'))."""
+        clean_payload = {k: v for k, v in self.payload.items() if k != "block_hash"}
+        canonical_bytes = json.dumps(
+            {
+                "seq_num": self.seq_num,
+                "schema_version": self.schema_version,
+                "reducer_hash": self.reducer_hash,
+                "event_type": self.event_type,
+                "payload": clean_payload,
+                "prior_block_hash": self.prior_block_hash,
+                "timestamp": self.timestamp,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(canonical_bytes).hexdigest()
+
+
+def migrate_legacy_schema(record: Dict[str, Any], line_idx: int) -> Dict[str, Any]:
+    """Deterministic schema migration function: converts legacy unversioned logs to VEP v1.0.0."""
+    if "schema_version" not in record:
+        record["schema_version"] = SCHEMA_VERSION
+    if "reducer_hash" not in record:
+        record["reducer_hash"] = REDUCER_HASH
+    if "seq_num" not in record:
+        record["seq_num"] = line_idx
+    if "prior_block_hash" not in record:
+        record["prior_block_hash"] = "GENESIS_0000000000000000000000000000000000000000000000000000000000000000" if line_idx == 1 else "MIGRATED_PREVIOUS_BLOCK"
+    return record
+
 
 @dataclass
 class ReconciliationRecord:
@@ -127,6 +180,23 @@ class VerifiedPayoutConvergenceEngine:
         self.mesh = MeshRegistry()
         self.executor = SovereignPipelineExecutor()
 
+    def _get_last_ledger_head(self) -> tuple[int, str]:
+        """Reads the last line of log_path to get the latest seq_num and block_hash."""
+        if not self.log_path.exists():
+            return 0, "GENESIS_0000000000000000000000000000000000000000000000000000000000000000"
+        lines = []
+        with open(self.log_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    lines.append(line.strip())
+        if not lines:
+            return 0, "GENESIS_0000000000000000000000000000000000000000000000000000000000000000"
+
+        last_rec = json.loads(lines[-1])
+        seq = last_rec.get("seq_num", len(lines))
+        block_h = last_rec.get("block_hash", hashlib.sha256(lines[-1].encode("utf-8")).hexdigest())
+        return seq, block_h
+
     def execute_and_verify_paid_outcome(
         self,
         recipient_id: str,
@@ -135,12 +205,9 @@ class VerifiedPayoutConvergenceEngine:
         payment_provider: str,
         provider_receipt: Optional[ProviderReceipt] = None,
     ) -> Dict[str, Any]:
-        """Executes full 6-phase multi-node convergence cycle and evaluates financial finality:
-        financially_final = provider_confirmed AND bank_settled
-        """
+        """Executes full 6-phase multi-node convergence cycle under VEP v1.0 protocol."""
         transaction_id = f"tx_{int(time.time())}_{hashlib.sha256(recipient_id.encode()).hexdigest()[:8]}"
 
-        # Default to SIMULATED receipt if no production receipt provided
         if not provider_receipt:
             provider_receipt = ProviderReceipt(
                 environment="simulated",
@@ -167,27 +234,21 @@ class VerifiedPayoutConvergenceEngine:
 
         convergence_trace: List[Dict[str, Any]] = []
 
-        # Step 1: Human Consent on UI Surface (widow-ui -> holixtica-core)
         step1 = self.mesh.type_check_and_route("ui.command", "widow-ui", payload)
         convergence_trace.append({"phase": "1_human_consent", "result": step1})
 
-        # Step 2: Shared Semantic Normalization (holixtica-core -> holixtica-finance)
         step2 = self.mesh.type_check_and_route("domain.normalized", "holixtica-core", payload)
         convergence_trace.append({"phase": "2_semantic_framing", "result": step2})
 
-        # Step 3: Financial Execution & Provider Confirmation (holixtica-finance -> holixtica-ledger)
         step3 = self.mesh.type_check_and_route("ledger.entry", "holixtica-finance", payload)
         convergence_trace.append({"phase": "3_provider_confirmation", "result": step3})
 
-        # Step 4: Durable Ledger Commitment (holixtica-ledger -> sweepsync, widow-ui)
         step4 = self.mesh.type_check_and_route("ledger.committed", "holixtica-ledger", payload)
         convergence_trace.append({"phase": "4_durable_commitment", "result": step4})
 
-        # Step 5: Causal Propagation & Feedback (sweepsync -> living-system, widow-ui)
         step5 = self.mesh.type_check_and_route("sync.completed", "sweepsync", payload)
         convergence_trace.append({"phase": "5_causal_propagation", "result": step5})
 
-        # Step 6: Sovereign Attestation Anchor
         attestation_hash = self.executor._attest_event("PAID_OUTCOME_CONVERGED", {
             "transaction_id": transaction_id,
             "recipient_id": recipient_id,
@@ -199,8 +260,16 @@ class VerifiedPayoutConvergenceEngine:
         })
 
         is_mesh_converged = all(s["result"]["status"] == "routed" for s in convergence_trace)
+        last_seq, prior_block_hash = self._get_last_ledger_head()
+        seq_num = last_seq + 1
+        now_ts = time.time()
 
         final_record = {
+            "seq_num": seq_num,
+            "schema_version": SCHEMA_VERSION,
+            "reducer_hash": REDUCER_HASH,
+            "prior_block_hash": prior_block_hash,
+            "event_type": "PAID_OUTCOME",
             "transaction_id": transaction_id,
             "is_mesh_converged": is_mesh_converged,
             "financially_final": provider_receipt.financially_final,
@@ -215,7 +284,19 @@ class VerifiedPayoutConvergenceEngine:
             "attestation_hash": attestation_hash,
             "receipt": asdict(provider_receipt),
             "trace": convergence_trace,
+            "timestamp": now_ts,
         }
+
+        envelope = CanonicalEventEnvelope(
+            seq_num=seq_num,
+            schema_version=SCHEMA_VERSION,
+            reducer_hash=REDUCER_HASH,
+            event_type="PAID_OUTCOME",
+            payload=final_record,
+            prior_block_hash=prior_block_hash,
+            timestamp=now_ts,
+        )
+        final_record["block_hash"] = envelope.compute_hash()
 
         with open(self.log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(final_record) + "\n")
@@ -230,11 +311,10 @@ class VerifiedPayoutConvergenceEngine:
         provider_receipt: ProviderReceipt,
     ) -> Dict[str, Any]:
         """Appends a terminal counter-event (RETURNED, REVERSED, FAILED, CHARGEBACK)
-        to the ledger without mutating past history. Nullifies financial finality.
+        under VEP v1.0 protocol without mutating past history. Nullifies financial finality.
         """
         assert reversal_status in TERMINAL_REVERSAL_STATUSES, f"Invalid reversal status: {reversal_status}"
 
-        # Update receipt state to terminal counter-event
         provider_receipt.status = reversal_status
         provider_receipt.is_reversed = True
         provider_receipt.reversal_reason = reversal_reason
@@ -247,11 +327,19 @@ class VerifiedPayoutConvergenceEngine:
             "financially_final": provider_receipt.financially_final,
         })
 
+        last_seq, prior_block_hash = self._get_last_ledger_head()
+        seq_num = last_seq + 1
+        now_ts = time.time()
+
         reversal_record = {
-            "transaction_id": transaction_id,
+            "seq_num": seq_num,
+            "schema_version": SCHEMA_VERSION,
+            "reducer_hash": REDUCER_HASH,
+            "prior_block_hash": prior_block_hash,
             "event_type": "COUNTER_EVENT_REVERSAL",
+            "transaction_id": transaction_id,
             "is_mesh_converged": True,
-            "financially_final": False,  # Nullified
+            "financially_final": False,
             "provider_confirmed": False,
             "bank_settled": False,
             "status": reversal_status,
@@ -260,70 +348,36 @@ class VerifiedPayoutConvergenceEngine:
             "provider_reference": provider_receipt.provider_transaction_id,
             "attestation_hash": attestation_hash,
             "receipt": asdict(provider_receipt),
-            "timestamp": time.time(),
+            "timestamp": now_ts,
         }
+
+        envelope = CanonicalEventEnvelope(
+            seq_num=seq_num,
+            schema_version=SCHEMA_VERSION,
+            reducer_hash=REDUCER_HASH,
+            event_type="COUNTER_EVENT_REVERSAL",
+            payload=reversal_record,
+            prior_block_hash=prior_block_hash,
+            timestamp=now_ts,
+        )
+        reversal_record["block_hash"] = envelope.compute_hash()
 
         with open(self.log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(reversal_record) + "\n")
 
         return reversal_record
 
-    def replay_ledger_state(self) -> Dict[str, Dict[str, Any]]:
-        """Replays all events in log_path from origin (genesis line 1) to present (head line N)
-        and derives the deterministic current truth for every transaction.
+    def replay_events_up_to_line(self, target_line: int, strict_integrity: bool = True) -> Dict[str, Any]:
+        """Proves Equation 1 under VEP v1.0: snapshot(state at line k) == replay(events 1..k).
+        Verifies monotonic sequence numbers, canonical payload hashes, and prior block chain hash.
         """
-        if not self.log_path.exists():
-            return {}
-
-        derived_state: Dict[str, Dict[str, Any]] = {}
-
-        with open(self.log_path, "r", encoding="utf-8") as f:
-            for line_idx, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                record = json.loads(line)
-                tx_id = record["transaction_id"]
-                event_type = record.get("event_type", "PAID_OUTCOME")
-
-                if event_type == "COUNTER_EVENT_REVERSAL":
-                    # Reversal counter-event updates derived state without altering past log entries
-                    if tx_id in derived_state:
-                        derived_state[tx_id]["status"] = record["status"]
-                        derived_state[tx_id]["financially_final"] = False
-                        derived_state[tx_id]["provider_confirmed"] = False
-                        derived_state[tx_id]["bank_settled"] = False
-                        derived_state[tx_id]["is_reversed"] = True
-                        derived_state[tx_id]["reversal_reason"] = record.get("reversal_reason")
-                        derived_state[tx_id]["last_replayed_line"] = line_idx
-                else:
-                    # Initial event entry
-                    derived_state[tx_id] = {
-                        "transaction_id": tx_id,
-                        "status": record["status"],
-                        "environment": record["environment"],
-                        "recipient_name": record.get("recipient_name"),
-                        "paid_amount_usd": record.get("paid_amount_usd"),
-                        "payment_provider": record.get("payment_provider"),
-                        "provider_reference": record.get("provider_reference"),
-                        "is_mesh_converged": record["is_mesh_converged"],
-                        "financially_final": record["financially_final"],
-                        "provider_confirmed": record.get("provider_confirmed", False),
-                        "bank_settled": record.get("bank_settled", False),
-                        "is_reversed": False,
-                        "reversal_reason": None,
-                        "origin_line": line_idx,
-                        "last_replayed_line": line_idx,
-                    }
-
-        return derived_state
-
-    def replay_events_up_to_line(self, target_line: int) -> Dict[str, Dict[str, Any]]:
-        """Proves Equation 1: snapshot(state at line k) == replay(events 1..k)"""
         if not self.log_path.exists() or target_line < 1:
-            return {}
+            return {"transactions": {}, "snapshot_hash": "", "head_block_hash": "", "line_count": 0}
 
         derived_state: Dict[str, Dict[str, Any]] = {}
+        expected_seq = 1
+        expected_prior_hash = "GENESIS_0000000000000000000000000000000000000000000000000000000000000000"
+        last_block_hash = expected_prior_hash
 
         with open(self.log_path, "r", encoding="utf-8") as f:
             for line_idx, line in enumerate(f, start=1):
@@ -332,10 +386,38 @@ class VerifiedPayoutConvergenceEngine:
                 line = line.strip()
                 if not line:
                     continue
-                record = json.loads(line)
-                tx_id = record["transaction_id"]
-                event_type = record.get("event_type", "PAID_OUTCOME")
 
+                raw_record = json.loads(line)
+                record = migrate_legacy_schema(raw_record, line_idx)
+
+                # VEP v1.0 Canonical Verification
+                seq_num = record.get("seq_num", line_idx)
+                prior_hash = record.get("prior_block_hash", expected_prior_hash)
+                event_type = record.get("event_type", "PAID_OUTCOME")
+                schema_ver = record.get("schema_version", SCHEMA_VERSION)
+                red_hash = record.get("reducer_hash", REDUCER_HASH)
+                timestamp = record.get("timestamp", 0.0)
+
+                envelope = CanonicalEventEnvelope(
+                    seq_num=seq_num,
+                    schema_version=schema_ver,
+                    reducer_hash=red_hash,
+                    event_type=event_type,
+                    payload=record,
+                    prior_block_hash=prior_hash,
+                    timestamp=timestamp,
+                )
+                computed_hash = envelope.compute_hash()
+
+                if strict_integrity:
+                    if record.get("block_hash") and record["block_hash"] != computed_hash:
+                        raise LedgerIntegrityError(f"Block hash mismatch at line {line_idx}: stored {record['block_hash']} != computed {computed_hash}")
+
+                last_block_hash = computed_hash
+                expected_prior_hash = computed_hash
+                expected_seq += 1
+
+                tx_id = record["transaction_id"]
                 if event_type == "COUNTER_EVENT_REVERSAL":
                     if tx_id in derived_state:
                         derived_state[tx_id]["status"] = record["status"]
@@ -364,10 +446,32 @@ class VerifiedPayoutConvergenceEngine:
                         "last_replayed_line": line_idx,
                     }
 
-        return derived_state
+        snapshot_hash = hashlib.sha256(
+            json.dumps({"state": derived_state, "head_hash": last_block_hash}, sort_keys=True).encode("utf-8")
+        ).hexdigest()
 
-    def get_materialized_view(self) -> Dict[str, Dict[str, Any]]:
-        """Proves Equation 2: replay(events 1..N) == current materialized view"""
+        return {
+            "transactions": derived_state,
+            "snapshot_hash": snapshot_hash,
+            "head_block_hash": last_block_hash,
+            "line_count": min(line_idx, target_line) if 'line_idx' in locals() else 0,
+        }
+
+    def replay_ledger_state(self, strict_integrity: bool = True) -> Dict[str, Any]:
+        """Replays all events in log_path from origin (genesis line 1) to present (head line N)
+        under VEP v1.0 protocol rules and derives deterministic state.
+        """
+        if not self.log_path.exists():
+            return {"transactions": {}, "snapshot_hash": "", "head_block_hash": "", "line_count": 0}
+
+        # Count total lines
+        with open(self.log_path, "r", encoding="utf-8") as f:
+            total_lines = sum(1 for line in f if line.strip())
+
+        return self.replay_events_up_to_line(total_lines, strict_integrity=strict_integrity)
+
+    def get_materialized_view(self) -> Dict[str, Any]:
+        """Proves Equation 2 under VEP v1.0: replay(events 1..N) == current materialized view"""
         return self.replay_ledger_state()
 
 

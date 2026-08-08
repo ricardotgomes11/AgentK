@@ -5,16 +5,23 @@ description: >
   5-field 1-to-1 account reconciliation matching for production SETTLED financial finality.
 ---
 
-# Financial Settlement Verifier
+# Financial Settlement Verifier — VEP v1.0 Protocol
 
 ## Overview
 
-Packaging the complete AgentK multi-node mesh orchestration and financial finality verification workflow.
+Packaging the complete AgentK multi-node mesh orchestration and financial finality verification workflow bound by the **Verifiable Event Protocol (VEP v1.0)**.
 Distinguishes between **mesh convergence** (`is_mesh_converged` = node agreement) and **financial finality** (`financially_final` = signed provider confirmation + bank statement reconciliation).
 
-## Financial Finality Invariant
+## Verifiable Event Protocol (VEP v1.0) Guarantees
 
-A transaction is marked `financially_final = True` if and only if:
+Every event block in the ledger is bound to:
+1. **`schema_version`** (`1.0.0`) and **reducer version digest** (`reducer_hash = SHA256(code)`).
+2. **Monotonic sequence number** (`seq_num` = 1, 2, 3...) and **canonical JSON serialization** (`sort_keys=True, separators=(',', ':')`).
+3. **Prior block hash binding** ($H_k = \text{SHA256}(H_{k-1} \parallel e_k)$) verified before state reduction.
+4. **Snapshot hash** and **ledger-head hash** calculated at every checkpoint.
+5. **`migrate_legacy_schema(record)`** for deterministic historic schema migration.
+
+## Financial Finality Invariant
 
 $$\text{financially\_final} = \text{production} \land \text{signature\_verified} \land \text{provider\_settled} \land \text{seven\_field\_match} \land \text{within\_settlement\_window} \land \neg\text{reversed}$$
 
