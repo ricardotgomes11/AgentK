@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph, MessagesState
@@ -9,7 +9,6 @@ import config
 system_prompt = """You are web_researcher, a ReAct agent that can use the web to research answers.
 
 You have a tool to search the web, and a tool to fetch the content of a web page.
-```
 """
     
 from tools.duck_duck_go_web_search import duck_duck_go_web_search
@@ -17,7 +16,7 @@ from tools.fetch_web_page_content import fetch_web_page_content
 
 tools = [duck_duck_go_web_search, fetch_web_page_content]
 
-def reasoning(state: MessagesState):
+def reasoning(state: MessagesState) -> dict[str, Any]:
     print("web_researcher is thinking...")
     messages = state['messages']
     tooled_up_model = config.default_langchain_model.bind_tools(tools)
@@ -54,7 +53,7 @@ workflow.add_edge("tools", 'reasoning')
 graph = workflow.compile()
 
 
-def web_researcher(task: str) -> str:
+def web_researcher(task: str) -> dict[str, Any]:
     """Researches the web."""
     return graph.invoke(
         {"messages": [SystemMessage(system_prompt), HumanMessage(task)]}

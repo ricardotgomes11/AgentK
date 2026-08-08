@@ -1,4 +1,5 @@
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph, MessagesState
@@ -7,20 +8,37 @@ from langgraph.prebuilt import ToolNode
 import config
 import utils
 
-example_agent = "web_researcher"
+# Project root directory anchor
+BASE_DIR = Path(__file__).resolve().parent.parent
 
-with open(f"agents/{example_agent}.py", 'r') as file:
-    agent_code = file.read()
-    
-with open(f"tests/agents/test_{example_agent}.py", 'r') as file:
-    agent_test_code = file.read()
 
-system_prompt = f"""You are agent_smith, a ReAct agent that develops other ReAct agents.
+def load_agent_template(example_agent: str = "web_researcher", base_dir: Path | None = None) -> tuple[str, str]:
+    """Loads source and test template code for a given example agent relative to base_dir."""
+    if base_dir is None:
+        base_dir = BASE_DIR
+
+    agent_path = base_dir / "agents" / f"{example_agent}.py"
+    test_path = base_dir / "tests" / "agents" / f"test_{example_agent}.py"
+
+    with open(agent_path, "r", encoding="utf-8") as file:
+        agent_code = file.read()
+
+    with open(test_path, "r", encoding="utf-8") as file:
+        agent_test_code = file.read()
+
+    return agent_code, agent_test_code
+
+
+def get_system_prompt(example_agent: str = "web_researcher", base_dir: Path | None = None) -> str:
+    """Constructs the system prompt for agent_smith with CWD-independent template loading."""
+    agent_code, agent_test_code = load_agent_template(example_agent, base_dir=base_dir)
+
+    return f"""You are agent_smith, a ReAct agent that develops other ReAct agents.
 
 You are part of a system called AgentK - an autoagentic AGI.
 AgentK is a self-evolving AGI made of agents that collaborate, and build new agents as needed, in order to complete tasks for a user.
 Agent K is a modular, self-evolving AGI system that gradually builds its own mind as you challenge it to complete tasks.
-The "K" stands kernel, meaning small core. The aim is for AgentK to be the minimum set of agents and tools necessary for it to bootstrap itself and then grow its own mind.
+The "K" stands for kernel, meaning small core. The aim is for AgentK to be the minimum set of agents and tools necessary for it to bootstrap itself and then grow its own mind.
 
 AgentK's mind is made up of:
 - Agents who collaborate to solve problems
@@ -28,7 +46,7 @@ AgentK's mind is made up of:
 
 Your responses must be either an inner monologue or a message to the user.
 If you are intending to call tools, then your response must be a succinct summary of your inner thoughts.
-Else, your response is a message the user.
+Else, your response is a message to the user.
 
 You approach your given task this way:
 1. Create a detailed plan for how to design an agent to achieve the task.
@@ -66,21 +84,27 @@ tests/agents/test_{example_agent}.py
 Here's a list of currently available agents:
 {utils.all_agents(exclude=["hermes", "agent_smith"])}
 """
-    
+
+
+example_agent = "web_researcher"
+system_prompt = get_system_prompt(example_agent)
+
 tools = utils.all_tool_functions()
 
-def reasoning(state: MessagesState):
+
+def reasoning(state: MessagesState) -> dict[str, Any]:
     print()
     print("agent_smith is thinking...")
-    messages = state['messages']
+    messages = state["messages"]
     tooled_up_model = config.default_langchain_model.bind_tools(tools)
     response = tooled_up_model.invoke(messages)
     return {"messages": [response]}
 
+
 def check_for_tool_calls(state: MessagesState) -> Literal["tools", END]:
-    messages = state['messages']
+    messages = state["messages"]
     last_message = messages[-1]
-    
+
     if last_message.tool_calls:
         if not last_message.content.strip() == "":
             print("agent_smith thought this:")
@@ -89,8 +113,9 @@ def check_for_tool_calls(state: MessagesState) -> Literal["tools", END]:
         print("agent_smith is acting by invoking these tools:")
         print([tool_call["name"] for tool_call in last_message.tool_calls])
         return "tools"
-    
+
     return END
+
 
 acting = ToolNode(tools)
 
@@ -102,12 +127,11 @@ workflow.add_conditional_edges(
     "reasoning",
     check_for_tool_calls,
 )
-workflow.add_edge("tools", 'reasoning')
+workflow.add_edge("tools", "reasoning")
 
 graph = workflow.compile()
 
-def agent_smith(task: str) -> str:
+
+def agent_smith(task: str) -> dict[str, Any]:
     """Designs and implements new agents, each designed to play a unique role."""
-    return graph.invoke(
-        {"messages": [SystemMessage(system_prompt), HumanMessage(task)]}
-    )
+    return graph.invoke({"messages": [SystemMessage(system_prompt), HumanMessage(task)]})

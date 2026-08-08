@@ -1,7 +1,11 @@
 checkpoints.sqlite*
-__pycache__
+__pycache__/
 .env
-tmp
+tmp/
 _scratch.py
-
 venv/
+
+nexus_ledger/*.out
+nexus_ledger/*.err
+*.log
+.DS_Store
