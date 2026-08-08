@@ -28,6 +28,12 @@ class TestSovereignPipelineExecutor(unittest.TestCase):
             self.assertEqual(lines[0]["prior_hash"], "0" * 64)
             self.assertEqual(lines[1]["prior_hash"], lines[0]["event_hash"])
 
+            # Verify external chain head anchor
+            chain_head_path = ledger_path.parent / "chain_head.json"
+            self.assertTrue(chain_head_path.exists())
+            anchor_data = json.loads(chain_head_path.read_text())
+            self.assertEqual(anchor_data["chain_head_hash"], res2["event_hash"])
+
     def test_pipeline_denied_execution_audited(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             ledger_path = Path(tmpdir) / "test_ledger.log"

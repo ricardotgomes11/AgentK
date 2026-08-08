@@ -65,6 +65,20 @@ class SovereignPipelineExecutor:
             f.write(json.dumps(record) + "\n")
 
         self.last_event_hash = event_hash
+
+        # Anchor chain head externally
+        chain_head_file = self.ledger_path.parent / "chain_head.json"
+        anchor_data = {
+            "chain_head_hash": event_hash,
+            "timestamp": timestamp,
+            "event_type": event_type,
+            "ledger_file": str(self.ledger_path),
+        }
+        try:
+            chain_head_file.write_text(json.dumps(anchor_data, indent=2))
+        except Exception:
+            pass
+
         return event_hash
 
     def process_and_execute(self, tool_name: str, raw_command: str, raw_args: Optional[Dict[str, Any]] = None, origin: str = "local_agent") -> Dict[str, Any]:
