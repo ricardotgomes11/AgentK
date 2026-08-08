@@ -2,7 +2,7 @@ import unittest
 import tempfile
 import json
 from pathlib import Path
-from verified_payout_convergence import VerifiedPayoutConvergenceEngine, ProviderReceipt
+from verified_payout_convergence import VerifiedPayoutConvergenceEngine, ProviderReceipt, ReconciliationRecord
 
 class TestVerifiedPayoutConvergence(unittest.TestCase):
     def test_simulated_mesh_convergence(self):
@@ -28,6 +28,15 @@ class TestVerifiedPayoutConvergence(unittest.TestCase):
             log_path = Path(tmpdir) / "payout_convergence.log"
             engine = VerifiedPayoutConvergenceEngine(log_path=log_path)
 
+            rec = ReconciliationRecord(
+                reconciliation_id="rec_001",
+                provider_transaction_id="tx_mercury_prod_001",
+                amount_cents=50000,
+                currency="USD",
+                recipient_account_ref="acc_mercury_gomes",
+                direction="OUTBOUND",
+            )
+
             prod_receipt = ProviderReceipt(
                 environment="production",
                 status="SETTLED",
@@ -35,8 +44,9 @@ class TestVerifiedPayoutConvergence(unittest.TestCase):
                 amount_cents=50000,
                 currency="USD",
                 recipient_account_ref="acc_mercury_gomes",
+                raw_signature_digest="sha256:abc123def456",
                 signature_verified=True,
-                bank_reconciled=True,
+                reconciliation=rec,
             )
 
             res = engine.execute_and_verify_paid_outcome(

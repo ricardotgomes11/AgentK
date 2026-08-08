@@ -29,6 +29,17 @@ CONVERGENCE_LOG = PROJECT_ROOT / "nexus_ledger" / "payout_convergence.log"
 
 
 @dataclass
+class ReconciliationRecord:
+    reconciliation_id: str
+    provider_transaction_id: str
+    amount_cents: int
+    currency: str = "USD"
+    recipient_account_ref: str = ""
+    direction: str = "OUTBOUND"
+    settled_timestamp: float = 0.0
+
+
+@dataclass
 class ProviderReceipt:
     environment: str  # "production" vs "simulated"
     status: str  # SIMULATED, PENDING, PROVIDER_ACCEPTED, SETTLED, RETURNED
@@ -36,8 +47,21 @@ class ProviderReceipt:
     amount_cents: int
     currency: str = "USD"
     recipient_account_ref: str = ""
+    raw_signature_digest: str = ""
     signature_verified: bool = False
-    bank_reconciled: bool = False
+    reconciliation: Optional[ReconciliationRecord] = None
+
+    def matches_reconciliation(self, rec: Optional[ReconciliationRecord]) -> bool:
+        """Verifies amount, currency, direction, account reference, and provider transaction ID match."""
+        if not rec:
+            return False
+        return (
+            rec.provider_transaction_id == self.provider_transaction_id
+            and rec.amount_cents == self.amount_cents
+            and rec.currency == self.currency
+            and rec.recipient_account_ref == self.recipient_account_ref
+            and rec.direction.upper() == "OUTBOUND"
+        )
 
     @property
     def provider_confirmed(self) -> bool:
@@ -53,7 +77,8 @@ class ProviderReceipt:
         return (
             self.environment == "production"
             and self.status == "SETTLED"
-            and self.bank_reconciled
+            and self.signature_verified
+            and self.matches_reconciliation(self.reconciliation)
         )
 
     @property
@@ -91,7 +116,7 @@ class VerifiedPayoutConvergenceEngine:
                 currency="USD",
                 recipient_account_ref=recipient_id,
                 signature_verified=False,
-                bank_reconciled=False,
+                reconciliation=None,
             )
 
         payload = {
@@ -173,6 +198,15 @@ if __name__ == "__main__":
     print(json.dumps(sim_res, indent=2))
 
     # 2. Production Settled Financial Finality Execution
+    rec_record = ReconciliationRecord(
+        reconciliation_id="rec_bank_statement_990011",
+        provider_transaction_id="tx_prod_mercury_9988776655",
+        amount_cents=50000,
+        currency="USD",
+        recipient_account_ref="acc_mercury_gomes",
+        direction="OUTBOUND",
+        settled_timestamp=time.time(),
+    )
     prod_receipt = ProviderReceipt(
         environment="production",
         status="SETTLED",
@@ -180,8 +214,9 @@ if __name__ == "__main__":
         amount_cents=50000,
         currency="USD",
         recipient_account_ref="acc_mercury_gomes",
+        raw_signature_digest="sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         signature_verified=True,
-        bank_reconciled=True,
+        reconciliation=rec_record,
     )
     prod_res = engine.execute_and_verify_paid_outcome("user_99", "Ricardo Gomes", 50000, "Mercury_RTP", provider_receipt=prod_receipt)
     print(f"[PAID OUTCOME CONVERGENCE] Production Settled Execution (Mesh Converged: {prod_res['is_mesh_converged']}, Financially Final: {prod_res['financially_final']}):")
