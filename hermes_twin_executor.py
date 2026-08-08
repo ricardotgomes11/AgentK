@@ -235,6 +235,15 @@ class HermesAgenticExecutor:
         # Step 6: Agent self-evolution learning
         evolution_log = self.learn_compression_pattern(cycle)
         cycle.agent_evolution_log.append(str(evolution_log))
+
+        # Step 7: Adaptive Compression Routing (Self-Correction)
+        if compression_metrics.fidelity < 0.85:
+            self.compression_ratio = min(1.0, self.compression_ratio + 0.15)
+            self.compressed_dim = max(1, int(self.state_dimension * self.compression_ratio))
+            cycle.agent_evolution_log.append(
+                f"SYSTEM ADJUSTMENT: Fidelity {compression_metrics.fidelity:.4f} < 0.85. "
+                f"Compression ratio widened to {self.compression_ratio:.2f} for next cycle."
+            )
         
         # Store in execution log
         self.execution_log.append(cycle)

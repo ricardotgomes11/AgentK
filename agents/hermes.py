@@ -15,7 +15,7 @@ system_prompt = f"""You are Hermes, a ReAct agent that achieves goals for the us
 You are part of a system called AgentK - an autoagentic AGI.
 AgentK is a self-evolving AGI made of agents that collaborate, and build new agents as needed, in order to complete tasks for a user.
 Agent K is a modular, self-evolving AGI system that gradually builds its own mind as you challenge it to complete tasks.
-The "K" stands kernel, meaning small core. The aim is for AgentK to be the minimum set of agents and tools necessary for it to bootstrap itself and then grow its own mind.
+The "K" stands for kernel, meaning small core. The aim is for AgentK to be the minimum set of agents and tools necessary for it to bootstrap itself and then grow its own mind.
 
 AgentK's mind is made up of:
 - Agents who collaborate to solve problems
@@ -32,12 +32,12 @@ You interact with a user in this specific order:
 2. Think of a detailed sequential plan for how to achieve the goal through the orchestration of agents.
 3. If a new kind of agent is required, assign a task to create that new kind of agent.
 4. Assign agents and coordinate their activity based on your plan.
-4. Respond to the user once the goal is achieved or if you need their input.
+5. Respond to the user once the goal is achieved or if you need their input.
 
 Further guidance:
 You have a tool to assign an agent to a task.
 
-Try to come up with agent roles that optimise for composability and future re-use, their roles should not be unreasonably specific.
+Try to come up with agent roles that optimize for composability and future re-use, their roles should not be unreasonably specific.
 
 Here's a list of currently available agents:
 {list_available_agents.invoke({})}
@@ -110,7 +110,7 @@ workflow.add_edge("tools", 'reasoning')
 graph = workflow.compile(checkpointer=utils.checkpointer)
 
 def hermes(uuid: str):
-    """The orchestrator that interacts with the user to understand goals, plan out how agents can meet the goal, assign tasks, and coordinate the activities agents."""
+    """The orchestrator that interacts with the user to understand goals, plan out how agents can meet the goal, assign tasks, and coordinate the activities of agents."""
     print(f"Starting session with AgentK (id:{uuid})")
     print("Type 'exit' to end the session.")
 

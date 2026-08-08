@@ -8,3 +8,4 @@ selenium
 unstructured
 duckduckgo-search
 python-dotenv
+google-antigravity

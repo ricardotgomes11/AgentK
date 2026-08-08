@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph, MessagesState
@@ -29,7 +29,7 @@ tools = [
     list_available_agents
 ]
 
-def reasoning(state: MessagesState):
+def reasoning(state: MessagesState) -> dict[str, Any]:
     print("software_engineer is thinking...")
     messages = state['messages']
     tooled_up_model = config.default_langchain_model.bind_tools(tools)
@@ -66,7 +66,7 @@ workflow.add_edge("tools", 'reasoning')
 graph = workflow.compile()
 
 
-def software_engineer(task: str) -> str:
+def software_engineer(task: str) -> dict[str, Any]:
     """Creates, modifies, and deletes code, manages files, runs shell commands, and collaborates with other agents."""
     return graph.invoke(
         {"messages": [SystemMessage(system_prompt), HumanMessage(task)]}
