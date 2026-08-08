@@ -9,6 +9,7 @@ Seals the 13 breaches identified in the stress test.
 import os
 import re
 import subprocess
+import unicodedata
 from pathlib import Path
 from types import SimpleNamespace
 try:
@@ -143,9 +144,12 @@ def _deny_protected_writes(tc: types.ToolCall) -> bool:
 
 def _deny_dangerous_commands(tc: types.ToolCall) -> bool:
     """Returns True if shell command attempts to modify protected areas, execute code on protected files, or run system destruction."""
-    cmd = tc.args.get("CommandLine", "") or tc.args.get("command", "")
-    if not cmd:
+    raw_cmd = tc.args.get("CommandLine", "") or tc.args.get("command", "")
+    if not raw_cmd:
         return False
+
+    # Normalize Unicode using NFKC to resolve homoglyphs and compatibility characters
+    cmd = unicodedata.normalize("NFKC", str(raw_cmd))
 
     # Unconditional block on security bypass/override attempts
     override_patterns = [
@@ -171,6 +175,24 @@ def _deny_dangerous_commands(tc: types.ToolCall) -> bool:
     if any(re.search(pat, cmd) for pat in destructive_system_patterns):
         return True
 
+    # Unconditional block on dangerous interpreter indirection and shell wrappers
+    indirection_patterns = [
+        r"\bpython3?\s+-c\b",
+        r"\bbash\s+-c\b",
+        r"\bsh\s+-c\b",
+        r"\bzsh\s+-c\b",
+        r"\bperl\s+-e\b",
+        r"\bruby\s+-e\b",
+        r"\beval\(",
+        r"\bexec\(",
+        r"\bos\.system\b",
+        r"\bsubprocess\.",
+    ]
+    if any(re.search(pat, cmd) for pat in indirection_patterns):
+        # Allow benign python -c checks without destructive/override keywords
+        if any(kw in cmd for kw in ["rm -rf", "OVERRIDE", "agent_kernel", "sdk_bridge", "sovereign_gate", "self_heal", "requirements.txt"]):
+            return True
+
     # Blocked destructive/executing operators and commands targeting kernel files
     destructive_pattern = r"(?:>>|>|\brm\b|\bmv\b|\bchmod\b|\bsed\b|\btee\b|\bcp\b|\bunlink\b|\bdd\b|\btruncate\b|\bpython3?\b|\bcurl\b|\bwget\b|\btouch\b|\bawk\b)"
 
@@ -194,12 +216,23 @@ def _deny_dangerous_commands(tc: types.ToolCall) -> bool:
     if has_keyword and has_destructive_op:
         return True
 
-    # Also block destructive operations containing explicit PROJECT_ROOT path string
+    # Check canonical path resolution for symlinks in command tokens
     env_root = os.environ.get("AGENTK_ROOT")
     root = Path(env_root).resolve() if env_root else PROJECT_ROOT
     proj_root_str = str(root)
     if proj_root_str in cmd and has_destructive_op:
         return True
+
+    # Resolve token paths to detect symlink targeting protected files
+    for token in cmd.split():
+        token_clean = token.strip("'\"")
+        if "/" in token_clean or token_clean.endswith(".py") or token_clean.endswith(".sh"):
+            try:
+                resolved = Path(token_clean).resolve()
+                if is_protected_path(str(resolved)) and has_destructive_op:
+                    return True
+            except Exception:
+                pass
 
     return False
 

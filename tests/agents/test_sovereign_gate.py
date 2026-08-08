@@ -184,6 +184,65 @@ class TestExecutionIsolation(unittest.TestCase):
             self.assertTrue(result.denied)
             run.assert_not_called()
 
+    def test_run_shell_command_denied_never_invokes_subprocess(self):
+        from tools import run_shell_command
+        cmd = "export OVERRIDE_SECURITY=true && rm -rf /"
+        with patch("tools.run_shell_command.subprocess.run") as run:
+            res = run_shell_command.run_shell_command.invoke({"command": cmd})
+            self.assertTrue(res.get("denied"))
+            self.assertEqual(res.get("returncode"), 126)
+            run.assert_not_called()
+
+    def test_sovereign_controller_execute_task_denied_never_invokes_subprocess(self):
+        import sovereign_controller
+        cmd = "bash -c 'rm -rf /'"
+        with patch("sovereign_controller.subprocess.run") as run:
+            res = sovereign_controller.execute_task(cmd)
+            self.assertIn("denied by Sovereign Gate policy", res)
+            run.assert_not_called()
+
+    def test_unicode_homoglyph_nfkc_normalization_denial(self):
+        # Unicode fullwidth homoglyph for OVERRIDE_SECURITY
+        homoglyph_cmd = "export ＯＶＥＲＲＩＤＥ_ＳＥＣＵＲＩＴＹ=true && rm -rf /"
+        tc = SimpleNamespace(
+            name="run_command",
+            args={"CommandLine": homoglyph_cmd},
+            canonical_path=None,
+        )
+        with patch("agents.sovereign_gate.subprocess.run") as run:
+            result = sovereign_gate.evaluate_or_dispatch(tc)
+            self.assertTrue(result.denied)
+            run.assert_not_called()
+
+    def test_interpreter_indirection_eval_exec_denial(self):
+        cmd = "python3 -c \"import os; os.system('rm -rf agent_kernel.py')\""
+        tc = SimpleNamespace(
+            name="run_command",
+            args={"CommandLine": cmd},
+            canonical_path=None,
+        )
+        with patch("agents.sovereign_gate.subprocess.run") as run:
+            result = sovereign_gate.evaluate_or_dispatch(tc)
+            self.assertTrue(result.denied)
+            run.assert_not_called()
+
+    def test_symlink_traversal_canonical_path_denial(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            symlink_path = os.path.join(tmpdir, "symlink_kernel.py")
+            target_path = sovereign_gate.PROJECT_ROOT / "agent_kernel.py"
+            os.symlink(target_path, symlink_path)
+
+            tc = SimpleNamespace(
+                name="run_command",
+                args={"CommandLine": f"rm -f {symlink_path}"},
+                canonical_path=None,
+            )
+            with patch("agents.sovereign_gate.subprocess.run") as run:
+                result = sovereign_gate.evaluate_or_dispatch(tc)
+                self.assertTrue(result.denied)
+                run.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
