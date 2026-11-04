@@ -18,6 +18,8 @@ import re
 import subprocess
 import sys
 import time
+import signal
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -209,6 +211,57 @@ def restore_missing_from_head(root: Path, report: dict[str, Any]) -> list[str]:
     return restored
 
 
+MAX_CYCLES = 1000
+SHUTDOWN_SIGNAL: int | None = None
+
+
+def _request_shutdown(signum: int, _frame: Any) -> None:
+    global SHUTDOWN_SIGNAL
+    SHUTDOWN_SIGNAL = signum
+
+
+def _canonical_payload(value: dict[str, Any]) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _ledger_insert(
+    conn: sqlite3.Connection, cycle_index: int, origin: str,
+    state: str, payload_data: dict[str, Any]
+) -> str:
+    payload_str = _canonical_payload(payload_data)
+    checksum = hashlib.sha256(
+        f"{cycle_index}:{origin}:{state}:{payload_str}".encode("utf-8")
+    ).hexdigest()
+    conn.execute(
+        """
+        INSERT INTO sovereign_ledger (cycle_index, origin, state, checksum, payload)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (cycle_index, origin, state, checksum, payload_str),
+    )
+    conn.commit()
+    return checksum
+
+
+def verify_ledger(conn: sqlite3.Connection) -> dict[str, Any]:
+    checked = 0
+    for cycle_index, origin, state, checksum, payload in conn.execute(
+        "SELECT cycle_index, origin, state, checksum, payload "
+        "FROM sovereign_ledger ORDER BY cycle_index"
+    ):
+        expected = hashlib.sha256(
+            f"{cycle_index}:{origin}:{state}:{payload}".encode("utf-8")
+        ).hexdigest()
+        if not hashlib.compare_digest(checksum, expected):
+            raise RuntimeError(f"Ledger checksum mismatch at cycle {cycle_index}")
+        # Require canonical JSON, so alternate encodings cannot represent the same state.
+        parsed = json.loads(payload)
+        if _canonical_payload(parsed) != payload:
+            raise RuntimeError(f"Non-canonical ledger payload at cycle {cycle_index}")
+        checked += 1
+    return {"verified_records": checked, "integrity": "VALID"}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="AgentK forensic recovery watchdog")
     parser.add_argument("--root", default=os.environ.get("AGENTK_ROOT", str(Path(__file__).resolve().parent)))
@@ -218,43 +271,166 @@ def main() -> int:
                         help="restore tracked files missing from the working tree; never overwrite")
     parser.add_argument("--watch", action="store_true", help="repeat read-only audits")
     parser.add_argument("--interval", type=int, default=60)
-    parser.add_argument("--max-cycles", type=int, default=10,
-                        help="stop --watch after this many completed audit cycles")
+    parser.add_argument("--max-cycles", type=int, default=MAX_CYCLES,
+                        help="maximum ACTIVE cycles before the terminal ledger record")
+    parser.add_argument(
+        "--ledger",
+        default=os.environ.get(
+            "AGENTK_LEDGER_PATH",
+            str(Path.home() / ".agentk" / "sovereign_ledger.sqlite3"),
+        ),
+        help="SQLite ledger path (defaults outside the repository)",
+    )
     args = parser.parse_args()
     if args.max_cycles < 1:
         parser.error("--max-cycles must be at least 1")
+    if args.interval < 1:
+        parser.error("--interval must be at least 1")
 
     root = Path(args.root).resolve()
     if git(root, "rev-parse", "--is-inside-work-tree") != "true":
         print(f"ERROR: {root} is not a Git working tree.", file=sys.stderr)
         return 2
 
-    cycle_count = 0
-    while True:
-        report = audit(root, max(1, args.history_limit))
-        cycle_count += 1
-        if args.restore_missing:
-            report["restored_missing_files"] = restore_missing_from_head(root, report)
-            report["post_restore_git_status"] = git(root, "status", "--short")
-        if args.watch:
-            final_cycle = cycle_count >= args.max_cycles
-            report["watch_exit"] = {
-                "status": "completed" if final_cycle else "running",
-                "cycle_count": cycle_count,
-                "max_cycles": args.max_cycles,
-                "exit_reason": "max_cycles_reached" if final_cycle else None,
-                "final_stable_state": final_cycle,
+    ledger_path = Path(args.ledger).expanduser().resolve()
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(ledger_path), timeout=30)
+    conn.execute("PRAGMA synchronous=FULL")
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sovereign_ledger (
+            cycle_index INTEGER PRIMARY KEY,
+            origin TEXT NOT NULL,
+            state TEXT NOT NULL,
+            checksum TEXT NOT NULL,
+            payload TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+
+    try:
+        integrity = verify_ledger(conn)
+        existing = conn.execute(
+            "SELECT COUNT(*) FROM sovereign_ledger"
+        ).fetchone()[0]
+        if existing:
+            raise RuntimeError(
+                f"Ledger already contains {existing} records; refusing to append "
+                "a new cycle sequence to the existing primary-key space. "
+                "Choose a new --ledger path to start a separate run."
+            )
+
+        global SHUTDOWN_SIGNAL
+        SHUTDOWN_SIGNAL = None
+        signal.signal(signal.SIGINT, _request_shutdown)
+        signal.signal(signal.SIGTERM, _request_shutdown)
+
+        cycle = 1
+        while True:
+            if SHUTDOWN_SIGNAL is not None:
+                signal_name = signal.Signals(SHUTDOWN_SIGNAL).name
+                payload_data = {
+                    "status": "HALTED_SIGNAL",
+                    "final_cycle": cycle - 1,
+                    "signal": signal_name,
+                }
+                terminal_hash = _ledger_insert(
+                    conn, cycle, "system_manager", "HALTED_SIGNAL", payload_data
+                )
+                print(
+                    f"[SHUTDOWN] {signal_name}; ledger terminal record "
+                    f"cycle={cycle}, sha256={terminal_hash}",
+                    flush=True,
+                )
+                break
+
+            if cycle > args.max_cycles:
+                payload_data = {
+                    "status": "MAX_CYCLES_REACHED",
+                    "final_cycle": cycle - 1,
+                }
+                terminal_hash = _ledger_insert(
+                    conn, cycle, "system_manager",
+                    "HALTED_DETERMINISTIC", payload_data
+                )
+                print(
+                    f"[LIMIT] Maximum cycles reached ({args.max_cycles}). "
+                    f"State locked: HALTED_DETERMINISTIC; "
+                    f"terminal cycle={cycle}; sha256={terminal_hash}",
+                    flush=True,
+                )
+                break
+
+            report = audit(root, max(1, args.history_limit))
+            if args.restore_missing:
+                report["restored_missing_files"] = restore_missing_from_head(root, report)
+                report["post_restore_git_status"] = git(root, "status", "--short")
+
+            payload_data = {
+                "cycle": cycle,
+                "status": "ACTIVE",
+                "audit": report,
             }
-        payload = json.dumps(report, indent=2, sort_keys=True)
-        if args.output:
-            output = Path(args.output).expanduser().resolve()
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(payload + "\n", encoding="utf-8")
-        print(payload, flush=True)
-        if not args.watch or cycle_count >= args.max_cycles:
-            break
-        time.sleep(max(5, args.interval))
-    return 0
+            state_hash = _ledger_insert(
+                conn, cycle, "stream_worker", "CYCLING", payload_data
+            )
+
+            if args.output:
+                output = Path(args.output).expanduser().resolve()
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text(
+                    json.dumps(
+                        {
+                            "cycle": cycle,
+                            "state": "CYCLING",
+                            "checksum": state_hash,
+                            "ledger": str(ledger_path),
+                            "audit": report,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    ) + "\n",
+                    encoding="utf-8",
+                )
+            print(
+                json.dumps(
+                    {"cycle": cycle, "state": "CYCLING", "checksum": state_hash},
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            cycle += 1
+            if not args.watch:
+                break
+            if cycle <= args.max_cycles and SHUTDOWN_SIGNAL is None:
+                time.sleep(max(1, args.interval))
+
+        verification = verify_ledger(conn)
+        final_row = conn.execute(
+            "SELECT cycle_index, state, checksum FROM sovereign_ledger "
+            "ORDER BY cycle_index DESC LIMIT 1"
+        ).fetchone()
+        print(
+            json.dumps(
+                {
+                    "ledger": str(ledger_path),
+                    "verification": verification,
+                    "terminal_record": {
+                        "cycle_index": final_row[0],
+                        "state": final_row[1],
+                        "checksum": final_row[2],
+                    },
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return 0
+    except Exception as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 3
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":
