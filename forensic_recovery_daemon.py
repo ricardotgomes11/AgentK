@@ -218,25 +218,40 @@ def main() -> int:
                         help="restore tracked files missing from the working tree; never overwrite")
     parser.add_argument("--watch", action="store_true", help="repeat read-only audits")
     parser.add_argument("--interval", type=int, default=60)
+    parser.add_argument("--max-cycles", type=int, default=10,
+                        help="stop --watch after this many completed audit cycles")
     args = parser.parse_args()
+    if args.max_cycles < 1:
+        parser.error("--max-cycles must be at least 1")
 
     root = Path(args.root).resolve()
     if git(root, "rev-parse", "--is-inside-work-tree") != "true":
         print(f"ERROR: {root} is not a Git working tree.", file=sys.stderr)
         return 2
 
+    cycle_count = 0
     while True:
         report = audit(root, max(1, args.history_limit))
+        cycle_count += 1
         if args.restore_missing:
             report["restored_missing_files"] = restore_missing_from_head(root, report)
             report["post_restore_git_status"] = git(root, "status", "--short")
+        if args.watch:
+            final_cycle = cycle_count >= args.max_cycles
+            report["watch_exit"] = {
+                "status": "completed" if final_cycle else "running",
+                "cycle_count": cycle_count,
+                "max_cycles": args.max_cycles,
+                "exit_reason": "max_cycles_reached" if final_cycle else None,
+                "final_stable_state": final_cycle,
+            }
         payload = json.dumps(report, indent=2, sort_keys=True)
         if args.output:
             output = Path(args.output).expanduser().resolve()
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(payload + "\n", encoding="utf-8")
         print(payload, flush=True)
-        if not args.watch:
+        if not args.watch or cycle_count >= args.max_cycles:
             break
         time.sleep(max(5, args.interval))
     return 0
