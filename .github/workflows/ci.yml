@@ -26,7 +26,12 @@ jobs:
 
       - name: Bytecode Compilation Verification
         run: |
-          python -m py_compile stress_test_sovereign.py tools/query_local_perplexity.py bin/perplexity_mcp_bridge.py agents/sovereign_gate.py utils.py config.py
+          python -m py_compile forensic_recovery_daemon.py stress_test_sovereign.py tools/query_local_perplexity.py bin/perplexity_mcp_bridge.py agents/sovereign_gate.py utils.py config.py
+
+      - name: Run Read-Only Forensic Recovery Audit
+        run: |
+          python forensic_recovery_daemon.py --output "$RUNNER_TEMP/agentk-forensic-audit.json" > /dev/null
+          python -c "import json,sys; r=json.load(open(sys.argv[1])); assert r['git']['head']; assert r['safety']['read_only_default']; assert not r['safety']['secret_values_collected']; print('Forensic audit passed:', r['tracked_file_count'], 'tracked files')" "$RUNNER_TEMP/agentk-forensic-audit.json"
 
       - name: Run Unit Test Suite
         run: |
